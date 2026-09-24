@@ -57,6 +57,7 @@ def test_payload_roundtrip_compressed_and_plain(bosses):
 def test_build_html_structure(bosses, tmp_path):
     html = build_html(bosses, _args())
     assert html.startswith("<!DOCTYPE html>") and "<html lang='en'>" in html
+    assert "--surface-card:" in html and "--ring:" in html   # tokens.css is inlined
     payloads = _payloads(html)
     assert len(payloads) == len(bosses)
     for tab in payloads:
@@ -95,3 +96,16 @@ def test_js_syntax():
     src = static_file("dash.js")
     ctx = quickjs.Context()
     ctx.eval("(function(){\n" + src + "\n})")   # parse only
+
+
+def test_tokens_inlined_and_old_variables_gone():
+    css = static_file("dash.css")
+    for old in ("--bg", "--panel", "--panel2", "--text", "--muted", "--blue", "--focus"):
+        assert f"var({old})" not in css and f"{old}:" not in css, old
+    assert "--surface-card:" in static_file("tokens.css")
+
+
+@pytest.mark.xfail(strict=False, reason="dash.css is rewritten onto the type scale in Task 8")
+def test_css_uses_type_scale():
+    css = static_file("dash.css")
+    assert not re.search(r"font-size:\s*\d+px", css), "raw px font sizes; use var(--fs-*)"
