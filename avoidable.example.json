@@ -1,0 +1,10 @@
+{
+  "_comment": "Copy to avoidable.json. Keys = boss names as WCL shows them ('*' applies to every boss). Values = ability names players should never be hit by, exactly as they appear in abilities_seen.json.",
+  "Ula'tek": [
+    "Example Avoidable Ability",
+    "Another One"
+  ],
+  "*": [
+    "Falling Damage"
+  ]
+}

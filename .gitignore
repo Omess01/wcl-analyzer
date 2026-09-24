@@ -1,0 +1,21 @@
+# secrets
+.env
+*.token
+*.token.json
+
+# local state / caches
+.cache/
+venv/
+__pycache__/
+.pytest_cache/
+
+# build output + hand-built examples (contain player names)
+dashboard_*.html
+serenity-*.html
+out/
+abilities_seen.json
+
+# per-guild data (keep the *.example.* templates)
+nights.json
+roster.txt
+mplus_history.json

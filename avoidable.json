@@ -1,0 +1,221 @@
+{
+  "_comment": "Venomous Abyss draft. Boss keys = avoidable abilities. '*' = every boss. _ignore = trinkets/enchants/procs to drop from damage stats (self-inflicted damage such as Burning Rush, Stagger, SW:Death is now excluded automatically). Anything under _uncertain is ignored by the tool - it's your checklist: confirm with the 'Cast by' column in the Damage taken tab, then move entries up or delete them.",
+  "*": [
+    "Falling"
+  ],
+  "_ignore": [
+    "Seriously Sharp Seashell",
+    "Rune of Void-Tainted Shell",
+    "Set Fire to the Pain",
+    "Refraction",
+    "Stretch Time",
+    "Blessing of Dawn",
+    "Blessing of Sacrifice",
+    "Interpose"
+  ],
+  "Nek'zali the Soulcoiler": [
+    "Slithering Flame",
+    "Hungering Pyre",
+    "Soulcoil Well"
+  ],
+  "Entombed Sentinels": [
+    "Cultivated Burst"
+  ],
+  "Vashnik the Malignant": [
+    "Plague Wave",
+    "Exploding Infection",
+    "Stygian Burst"
+  ],
+  "The Lost Explorers": [
+    "Fire Patch",
+    "Frost Patch",
+    "Blast Wave",
+    "Shell Spin",
+    "Frostfire Volley",
+    "Explosive Surprise",
+    "Fungal Burst",
+    "Relic Rupture",
+    "Aftershock",
+    "Final Ascension"
+  ],
+  "Sszorak": [
+    "Turbulent Gusts",
+    "Caustic Residue",
+    "Ravage"
+  ],
+  "The Twin Fangs": [
+    "Noxious Slick",
+    "Caustic Globule",
+    "Caustic Deluge",
+    "Vile Flood",
+    "Corrosive Spit",
+    "Concentrated Spittle"
+  ],
+  "The Coiled Altar": [
+    "Noxious Ground",
+    "Defiled Ground",
+    "Volatile Venom",
+    "Stampede",
+    "Toxic Deluge",
+    "Defilement of the Coiled Altar"
+  ],
+  "Ula'tek": [
+    "Caustic Waves",
+    "Acidic Burst",
+    "Volatile Purge",
+    "Rattler Slam",
+    "Unchecked Rage",
+    "Putrid Membrane",
+    "Calcified Corpse",
+    "Falling Debris",
+    "Toxin Cloud"
+  ],
+  "_uncertain": {
+    "Nek'zali the Soulcoiler": {
+      "intended / tank - leave off": [
+        "Corpse Blight",
+        "Uncoiling",
+        "Possession Barrage",
+        "Essence Rend",
+        "Hollowing Strikes",
+        "Vessel of Awakening",
+        "Soul Transfer",
+        "Anguished Echoes",
+        "Invoke",
+        "Latent Cultist",
+        "[DNT] Increase Drumming"
+      ],
+      "note": "Soulcoil Rite only fires when an add reaches the Well or someone dies in it - that's why it's listed as avoidable even though it's raid-wide."
+    },
+    "Entombed Sentinels": {
+      "intended venom system - leave off": [
+        "Mark of Acid",
+        "Mark of Blood",
+        "Contaminate",
+        "Bloodvenom Injection",
+        "Blood Venom",
+        "Helical Toxins",
+        "Living Venom",
+        "Deadly Venom",
+        "Blighted Blood",
+        "Empowering Slam"
+      ],
+      "note": "Empowering Slam / the 99% shield happen when the bosses are too close - a positioning fail, but it's the boss that gets stronger, not players getting hit. Judge from the numbers."
+    },
+    "Vashnik the Malignant": {
+      "intended (fountain intercepts, tank, DoTs) - leave off": [
+        "Toxic Vapor",
+        "Burning Presence",
+        "Siphon Blood",
+        "Virulent Fumes",
+        "Dripping Fangs",
+        "Malignant Catalyst",
+        "Gloom Expulsion",
+        "Conflagrating Expulsion",
+        "Hemo Expulsion",
+        "Umbral Ejection",
+        "Catalytic Bile",
+        "Siphoning Infection",
+        "Stygian Infection",
+        "Deadly Venom"
+      ],
+      "note": "The three Expulsions/Ejection are the living venoms you are SUPPOSED to intercept - intended damage. Toxic Vapor is probably the room-filling soft enrage."
+    },
+    "Nymrissa Wavecaller": {
+      "probably avoidable - confirm": [
+        "Swirling Whirlpools",
+        "Frost Orb",
+        "Iceblade Flurry",
+        "Pop!",
+        "Shifting Sands"
+      ],
+      "intended - leave off": [
+        "Abyssal Rain",
+        "Lingering Frost",
+        "Chilling Frost",
+        "Wild Bite"
+      ],
+      "note": "Not one of the 8 main bosses - probably a rare/mini-boss the logger recorded. Ignore unless you care about it."
+    },
+    "The Lost Explorers": {
+      "intended / tank - leave off": [
+        "Malevolent Presence",
+        "Splinters",
+        "Shredding Shards",
+        "Throw Junk",
+        "Burning Flames",
+        "Piercing Frost",
+        "Evil Eyes",
+        "Icebound Flames",
+        "Mushroom Toss"
+      ],
+      "note": "Final Ascension is the possession soft-enrage - fires when the fish-feeding rotation fails, hence avoidable. Throw Junk / Mushroom Toss may be dodgeable too: check who gets hit."
+    },
+    "Sszorak": {
+      "intended - leave off": [
+        "Ula'tek's Presence",
+        "Mutilated Gash",
+        "Viscous Cyst",
+        "Tempest",
+        "Mutilate",
+        "Caustic Claws",
+        "Shifting Sands"
+      ],
+      "note": "Viscous Cyst is what stops your knockback - stepping on it is CORRECT. Falling (from '*') is the real fail on this boss."
+    },
+    "The Twin Fangs": {
+      "intended / tank - leave off": [
+        "Eternal Venom",
+        "Coiling Ichor",
+        "Stir the Depths",
+        "Venomous Emergence",
+        "Ravenous Feast",
+        "Deadly Venom",
+        "Congealed Gore",
+        "Sanguine Storm",
+        "Clotted Bolt",
+        "Shifting Sands",
+        "Flames of Ula'tek"
+      ],
+      "note": "Eternal Venom stacks are the fight's core resource - intended, but high stacks are a management fail. Track it in the heatmap rather than flagging it."
+    },
+    "The Coiled Altar": {
+      "note": "This is a POSSESSION fight - the hundreds of player spells in the list (Consecration, Flame Shock, Whirlwind...) are your own raiders hitting possessed players. That damage is intended, so it is NOT ignored; the 'Cast by' column shows who. Boss abilities I couldn't place: Coalesced Venom, Dreadful Presence, Spirit Erasure, Soul Sever, Gravebound, Retaliatory Malice, Twinfang Toxin, Pestilence, Virulent Plague, Axegrinder, Guillotine, Suffocating Darkness, Umbral Malignance, Tentacle Slam, Shadowbolt Volley, Void Volley, Concentrated Bile, Crimson Bile, Caustic Spatter, Wrath of Nathreza, Meteor/Meteorites, Stomp. Sort by 'Dmg / pull' and classify the top 10 only - the rest won't matter."
+    },
+    "Ula'tek": {
+      "probably avoidable - confirm": [
+        "Acidic Expulsion",
+        "Virulent Spit",
+        "Petrifying Sting",
+        "Poisonous Bite",
+        "Deadly Venom",
+        "Dread Roar",
+        "Anguished Cry"
+      ],
+      "tank mechanic - avoidable only for non-tanks (check heatmap)": [
+        "Mother's Wrath",
+        "Stone Venom",
+        "Hobbled"
+      ],
+      "intended - leave off": [
+        "Spectral Coils",
+        "Necrotic Vapors",
+        "Mephitic Thrash",
+        "Blight Vein",
+        "Serpent's Bite",
+        "Grasping Fangs",
+        "Circling Prey",
+        "Malignant Shell",
+        "Rage of the Shackled",
+        "Melee",
+        "Desperate Thrash",
+        "Writhing Gestation",
+        "Blightscale Clutch",
+        "Doomscale Shell",
+        "Warden's Protection",
+        "Malice"
+      ]
+    }
+  },
+  "_changelog": "2026-09-21: removed Soulcoil Rite, Caustic Explosion, Caustic Surge, Plague Froth, Venomous Surge, Venom Rupture, Fangs of the Coiled Altar (all hit every raider equally -> raid-wide) and Stone Breaker (tank mechanic). Putrid Membrane and Unchecked Rage are ALSO raid-wide but kept: they only exist after a fail (egg hatched / boss without melee target), so their count per pull IS the fail count. 2026-09-22: the dashboard's who-gets-hit check flagged Cremation, Toxic Droplets, Unstable Miasma, Clinging Murk, Noxious Blast, Congealing Bolt, Blink Nova, Mighty Thud, Raging Crosswinds and Toxic Fumes as raid-wide -> removed. Putrid Membrane and Unchecked Rage still flagged, still kept on purpose (fail-triggered)."
+}

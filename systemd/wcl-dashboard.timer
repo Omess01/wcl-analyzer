@@ -1,0 +1,11 @@
+# Runs 45 minutes after the usual end of each raid night (Thu, Sun, Mon 23:45 local).
+[Unit]
+Description=Build + post the WCL raid dashboard after raid nights
+
+[Timer]
+OnCalendar=Thu,Sun,Mon 23:45
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

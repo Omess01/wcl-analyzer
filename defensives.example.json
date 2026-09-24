@@ -1,0 +1,19 @@
+{
+  "_comment": "Copy to defensives.json to change which casts count as a defensive in the 'Defensives cast' column (casts by the dying player in the DEATH_WINDOW_SECONDS before the FIRST death of each pull). Case-insensitive substring match on the spell name. Without this file the built-in list of personal defensives, externals, Healthstone and healing potions is used.",
+  "defensives": [
+    "Healthstone", "Healing Potion",
+    "Anti-Magic Shell", "Icebound Fortitude", "Vampiric Blood", "Rune Tap", "Lichborne",
+    "Blur", "Netherwalk", "Darkness", "Demon Spikes", "Fiery Brand",
+    "Barkskin", "Survival Instincts", "Frenzied Regeneration", "Ironbark", "Renewal",
+    "Obsidian Scales", "Renewing Blaze", "Zephyr", "Time Dilation",
+    "Aspect of the Turtle", "Survival of the Fittest", "Exhilaration", "Fortitude of the Bear",
+    "Ice Block", "Greater Invisibility", "Alter Time", "Mirror Image", "Mass Barrier", "Prismatic Barrier", "Blazing Barrier", "Ice Barrier", "Ice Cold",
+    "Fortifying Brew", "Diffuse Magic", "Dampen Harm", "Touch of Karma", "Celestial Brew", "Life Cocoon", "Zen Meditation",
+    "Divine Shield", "Divine Protection", "Ardent Defender", "Guardian of Ancient Kings", "Blessing of Protection", "Blessing of Sacrifice", "Blessing of Spellwarding", "Lay on Hands", "Shield of Vengeance",
+    "Desperate Prayer", "Dispersion", "Pain Suppression", "Power Word: Barrier", "Fade", "Guardian Spirit", "Vampiric Embrace", "Void Shift",
+    "Cloak of Shadows", "Evasion", "Feint", "Crimson Vial", "Vanish",
+    "Astral Shift", "Ancestral Guidance", "Spirit Link Totem", "Earth Elemental", "Stone Bulwark Totem", "Ancestral Protection Totem",
+    "Unending Resolve", "Dark Pact", "Mortal Coil",
+    "Shield Wall", "Last Stand", "Die by the Sword", "Rallying Cry", "Spell Reflection", "Ignore Pain", "Enraged Regeneration", "Defensive Stance", "Bitter Immunity", "Demoralizing Shout", "Shield Block"
+  ]
+}

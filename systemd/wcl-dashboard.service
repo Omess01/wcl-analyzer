@@ -1,0 +1,13 @@
+# User service: build + post the dashboard. Install with
+#   mkdir -p ~/.config/systemd/user
+#   cp systemd/wcl-dashboard.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now wcl-dashboard.timer
+# Edit WorkingDirectory/ExecStart if the project lives elsewhere.
+[Unit]
+Description=Build the WCL raid dashboard and post it to Discord
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/WCL_analyzer
+ExecStart=%h/Projects/WCL_analyzer/systemd/wcl-dashboard.sh
+Environment=WCL_RANGE_START=2026-08-23

@@ -1,0 +1,8 @@
+{
+  "_comment": "Copy to nights.json. _open_days = weekdays that count as open nights; reports on weekdays that are neither MAIN_RAID_DAYS nor open days are skipped (OPEN_RAID_DAYS in .env overrides this list). _include = report codes to always add to the dataset (e.g. a log not on the guild page). _ignore = codes to leave out. Other keys override the detection: a report code or a date (YYYY-MM-DD) -> 'main', 'open' or 'skip'.",
+  "_open_days": ["Mon"],
+  "_include": [],
+  "_ignore": [],
+  "PASTE_REPORT_CODE_HERE": "main",
+  "2026-01-01": "open"
+}
