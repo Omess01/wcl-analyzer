@@ -225,6 +225,8 @@ combat-log realm names to slugs via WCL's server list. `[CAVEAT]` Only an in-gam
   `[TODO]` optional second step: move the root modules into a `wcl/` package (touches 12 imports, `python -m wcl.mplus`, systemd, test bootstrap).
 - `[ADDED 2026-09-24]` Whole-project review `docs/reviews/REVIEW_2026-09-24.md` (32 verified bugs/risks, ranked) and phased `docs/ROADMAP_2026-09-24.md`;
   visual redesign plan `docs/plans/2026-09-24-dashboard-redesign.md` (replicates `dashboards/serenity-dashboard-rebuilt.html`, local only). Start with review §0.
+  `[ADDED 2026-09-24]` The plan now carries a **UX audit of the real build** (21 findings → task amendments + Tasks 10-12: density defaults,
+  status without colour, mobile pass). `[CAVEAT]` headless-Firefox deep-link screenshots need the delayed-`load` copy described in that section.
 
 - `[FIXED 2026-09-23]` Everything in `docs/reviews/REVIEW_2026-09-23b.md` except `logging`/`mypy`/browser test - see `docs/CHANGES_2026-09-23.md` Follow-up 3.
   Bundle is **v3**, casts entry **v2** (+ `buffs` for externals), consumable casts **v1** (filtered events); `NIGHT_PLAYERS` for bench;
