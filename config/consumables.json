@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy to consumables.json to change what counts as prepared. flask/food/vantus/rune are matched against the buffs active on each player when the pull starts (WCL combatant info). combat_potion/healing_potion/mana_potion/healthstone are matched against CAST names (item uses during the pull; a combat potion cast in the 5 s before the pull is the pre-pot). Lower-case substrings; a pattern starting with '-' excludes names containing it.",
+  "flask": ["flask of", "phial of"],
+  "food": ["well fed"],
+  "vantus": ["vantus rune"],
+  "rune": ["augment rune", "crystallized augment", "draconic augment rune"],
+  "combat_potion": ["potion", "-health", "-healing", "-mana"],
+  "healing_potion": ["health potion", "healing potion"],
+  "mana_potion": ["mana potion"],
+  "healthstone": ["healthstone"]
+}

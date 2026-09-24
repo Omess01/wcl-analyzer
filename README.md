@@ -58,7 +58,7 @@ scrolls to its Deaths section.
 
 Every run asks WCL for the current list of reports in your date range - that
 is never cached, so a new raid night is always found. Data tied to a specific
-report is cached in `.cache/` because finished reports never change:
+report is cached in `data/cache/` because finished reports never change:
 
 - Each report's `endTime` from the fresh list is compared with the value seen
   when it was cached. If it changed (a live log that grew), only the fights
@@ -156,7 +156,7 @@ in `.env`. The default file excludes `Nymrissa Wavecaller`.
 ## Posting to Discord automatically
 
 ```
-python post_discord.py dashboard_2026-08-23_to_2026-09-21.html     # needs DISCORD_WEBHOOK_URL in .env
+python post_discord.py dashboards/dashboard_2026-08-23_to_2026-09-21.html     # needs DISCORD_WEBHOOK_URL in .env
 ```
 
 `systemd/` holds a user service and timer that build the tier-to-date
@@ -165,6 +165,9 @@ service file has the install commands. `post_discord.py` refuses files over
 Discord's 10 MB limit.
 
 ## Configuration files
+
+All of these live in `config/`. Generated files (`abilities_seen.json`, `mplus_history.json`, the WCL cache) go to `data/`,
+built dashboards to `dashboards/`; both folders are git-ignored.
 
 | File | Purpose |
 |---|---|

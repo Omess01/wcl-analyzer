@@ -35,6 +35,7 @@ from zoneinfo import ZoneInfo
 import cache
 from cache import cached_query, get_entry, put_entry, count_api_call
 from fetch_reports import fetch_guild_reports
+from path import CONFIG_DIR
 from wcl_client import run_query, WCLError
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -275,7 +276,7 @@ def open_raid_days() -> set[str]:
     return days
 
 
-NIGHTS_FILE = os.path.join(HERE, "nights.json")
+NIGHTS_FILE = os.path.join(CONFIG_DIR, "nights.json")
 
 
 def night_overrides() -> dict:
@@ -402,8 +403,8 @@ def get_timezone():
 # Optional config: consumables + defensives (name patterns, case-insensitive)
 # --------------------------------------------------------------------------
 
-CONSUMABLES_FILE = os.path.join(HERE, "consumables.json")
-DEFENSIVES_FILE = os.path.join(HERE, "defensives.json")
+CONSUMABLES_FILE = os.path.join(CONFIG_DIR, "consumables.json")
+DEFENSIVES_FILE = os.path.join(CONFIG_DIR, "defensives.json")
 
 # flask / food / vantus / rune are matched against the auras active at pull start;
 # the *_potion and healthstone categories are matched against CAST names (items

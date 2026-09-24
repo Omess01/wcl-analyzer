@@ -3,19 +3,15 @@
 *.token
 *.token.json
 
-# local state / caches
-.cache/
+# python
 venv/
 __pycache__/
 .pytest_cache/
 
-# build output + hand-built examples (contain player names)
-dashboard_*.html
-serenity-*.html
-out/
-abilities_seen.json
+# generated state and build output (data/ holds the WCL cache; dashboards contain player names)
+data/
+dashboards/
 
-# per-guild data (keep the *.example.* templates)
-nights.json
-roster.txt
-mplus_history.json
+# per-guild config (player names / report codes); everything else in config/ is tracked
+config/nights.json
+config/roster.txt

@@ -5,6 +5,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 START="${WCL_RANGE_START:-2026-08-23}"
 END="$(date +%F)"
-OUT="dashboard_${START}_to_${END}.html"
+OUT="dashboards/dashboard_${START}_to_${END}.html"
 venv/bin/python build_dashboard.py "$START" "$END" -o "$OUT"
 venv/bin/python post_discord.py "$OUT" --message "Raid dashboard ${START} to ${END}"

@@ -28,7 +28,8 @@ except ImportError as exc:
         "  (first time: python -m venv venv && pip install -r requirements.txt)"
     )
 
-from collect_data import collect, default_difficulties, HERE
+from collect_data import collect, default_difficulties
+from path import DATA_DIR, DASHBOARD_DIR
 from dash.page import build_html
 from dash.mplus_tab import update_mplus_if_stale
 
@@ -49,7 +50,7 @@ def write_abilities_seen(bosses: dict) -> str:
             ab: {"hits": info["hits"], "sources": [s for s, _ in info["sources"].most_common(3)]}
             for ab, info in sorted(abilities.items(), key=lambda kv: -kv[1]["hits"])
         }
-    path = os.path.join(HERE, "abilities_seen.json")
+    path = os.path.join(DATA_DIR, "abilities_seen.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2, ensure_ascii=False)
     return path
@@ -146,7 +147,7 @@ def main():
     print(f"Abilities per boss (with hit counts and who cast them) written to {os.path.basename(seen_path)}")
     validate_config(bosses)
 
-    output = args.output or f"dashboard_{args.start}_to_{args.end}.html"
+    output = args.output or os.path.join(DASHBOARD_DIR, f"dashboard_{args.start}_to_{args.end}.html")
     html = build_html(bosses, args)
     with open(output, "w", encoding="utf-8") as f:
         f.write(html)

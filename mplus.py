@@ -33,11 +33,12 @@ from datetime import datetime, timedelta, timezone
 import requests
 from dotenv import load_dotenv
 
+from path import CONFIG_DIR, DATA_DIR
+
 load_dotenv()
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROSTER_FILE = os.path.join(HERE, "roster.txt")
-HISTORY_FILE = os.path.join(HERE, "mplus_history.json")
+ROSTER_FILE = os.path.join(CONFIG_DIR, "roster.txt")
+HISTORY_FILE = os.path.join(DATA_DIR, "mplus_history.json")
 
 RIO_URL = "https://raider.io/api/v1/characters/profile"
 RIO_FIELDS = ",".join([

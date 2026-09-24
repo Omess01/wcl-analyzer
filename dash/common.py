@@ -8,10 +8,10 @@ from collections import Counter, defaultdict
 import plotly.graph_objects as go
 
 from collect_data import normalize, busy_ms_between
+from path import CONFIG_DIR, DATA_DIR
 
-HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AVOIDABLE_FILE = os.path.join(HERE, "avoidable.json")
-MPLUS_FILE = os.path.join(HERE, "mplus_history.json")
+AVOIDABLE_FILE = os.path.join(CONFIG_DIR, "avoidable.json")
+MPLUS_FILE = os.path.join(DATA_DIR, "mplus_history.json")
 
 PLOTLY_CDN = "https://cdn.plot.ly/plotly-2.35.2.min.js"
 CHART_TEMPLATE = "plotly_dark"

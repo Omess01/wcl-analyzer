@@ -2,8 +2,8 @@
 
 > Read this first. It is the complete record of what exists, why it was built the way it was,
 > and what is unfinished. Claude Code reads this file automatically from the project root.
-> Detailed per-session change records live in `CHANGES_<date>.md`; the review that drove the
-> 2026-09-23 rework is `REVIEW_2026-09-23.md`. **Every code change must be recorded in a tagged .md.**
+> Detailed per-session change records live in `docs/CHANGES_<date>.md`; the review that drove the
+> 2026-09-23 rework is `docs/reviews/REVIEW_2026-09-23.md`. **Every code change must be recorded in a tagged .md.**
 >
 > Tag legend used throughout:
 > `[ADDED]` new capability · `[CHANGED]` behaviour changed · `[FIXED]` bug fix · `[REMOVED]` deliberately taken out ·
@@ -28,12 +28,18 @@ client-side filtering, and a Raider.IO-based Mythic+ tracker.
 
 ## 2. Repo layout
 
+`[CHANGED 2026-09-24]` Folders group files by kind; `path.py` is the only module that knows where they are
+(`ROOT`, `CONFIG_DIR`, `DATA_DIR`, `DASHBOARD_DIR`; creates `data/` and `dashboards/` on import).
+
 ```
+build_dashboard.py   CLI only: args -> collect() -> dash.page.build_html() -> dashboards/; writes data/abilities_seen.json
+mplus.py             Raider.IO Mythic+ tracker -> data/mplus_history.json; roster tools (--roster-from-raid [--nights main])
+post_discord.py      Post a built dashboard to a Discord webhook
 wcl_client.py        OAuth + GraphQL POST to WCL v2; timeout, retries/backoff (429/5xx/net/rate-limit), thread-safe   [stable]
-cache.py             On-disk JSON cache: cached_query (sha1(query+vars)) + get_entry/put_entry (explicit keys); lock; atomic writes
+cache.py             On-disk JSON cache in data/cache/: cached_query (sha1(query+vars)) + get_entry/put_entry; lock; atomic writes
 fetch_reports.py     Guild report list for a date range (NEVER cached)
 collect_data.py      All data collection -> {(boss, difficulty): [pull, ...]}  (see §5)
-build_dashboard.py   CLI only: args -> collect() -> dash.page.build_html() -> file; writes abilities_seen.json next to the scripts
+path.py              Folder layout constants (import from here, never compute paths from __file__ elsewhere)
 dash/common.py       esc/fmt, avoidable config, roles/specs, table()/cards()/gotab(), fig_html, breaks, all_pulls, player_stats
 dash/payload.py      pull_grid() (server-rendered click surface) + pull_payload() (compact per-pull JSON, gzip+base64)
 dash/home.py         Home tab: progress strip, insights(), last night
@@ -43,16 +49,20 @@ dash/mplus_tab.py    Mythic+ tab + update_mplus_if_stale()
 dash/page.py         Page assembly: header, toolbar, ARIA tablist, panels, inlines static/dash.css + static/dash.js
 dash/static/dash.js  THE renderer for boss tabs (all sections) + global filters + Players-tab dynamic view
 dash/static/dash.css Styles (dark theme, WoW class colours lightened for contrast, focus rings, reduced motion, responsive)
-mplus.py             Raider.IO Mythic+ tracker -> mplus_history.json; roster tools (--roster-from-raid [--nights main])
+config/              Files YOU edit (tracked, except nights.json and roster.txt which are per-guild and ignored)
+  avoidable.json       Per-boss avoidable abilities + _ignore (+ _uncertain checklist)
+  consumables.json / defensives.json   optional name-pattern overrides (defaults built in; *.example.json provided)
+  nights.json          night-type overrides, _include / _ignore report codes
+  roster.txt           Characters tracked for M+ (Name,realm-slug)
+data/                Files the TOOL writes (whole folder ignored)
+  cache/               WCL responses + report_meta.json (endTime seen per report)
+  abilities_seen.json  Written every build: abilities per boss with hit counts + sources
+  mplus_history.json   Written by mplus.py; read by the dashboard
+dashboards/          Built HTML (ignored: contains player names); default output of build_dashboard.py
+docs/                CHANGES_<date>.md, ROADMAP_*.md, reviews/REVIEW_*.md, plans/
 tests/               pytest suite; tests/make_fixtures.py records one report into tests/fixtures/ (offline replay)
+systemd/             user service + timer + build-and-post script
 legacy/merge_pulls.py  superseded early CLI
-avoidable.json       Per-boss avoidable abilities + _ignore (+ _uncertain checklist)
-consumables.json / defensives.json   optional name-pattern overrides (defaults built in; *.example.json provided)
-nights.json          night-type overrides, _include / _ignore report codes
-roster.txt           Characters tracked for M+ (Name,realm-slug)
-abilities_seen.json  Written every build: abilities per boss with hit counts + sources
-mplus_history.json   Written by mplus.py; read by the dashboard
-.cache/              WCL responses + report_meta.json (endTime seen per report)
 ```
 
 ## 3. Setup / run
@@ -60,7 +70,7 @@ mplus_history.json   Written by mplus.py; read by the dashboard
 ```
 python -m venv venv && source venv/bin/activate.fish     # fish shell!
 pip install -r requirements.txt                          # requests, python-dotenv, plotly (+ pytest, quickjs for tests)
-python build_dashboard.py 2026-08-23 2026-09-21          # -> dashboard_<start>_to_<end>.html
+python build_dashboard.py 2026-08-23 2026-09-21          # -> dashboards/dashboard_<start>_to_<end>.html
 python -m pytest -q                                      # 15 tests, offline
 ```
 
@@ -205,15 +215,18 @@ combat-log realm names to slugs via WCL's server list. `[CAVEAT]` Only an in-gam
   in Plotly objects. Syntax-check with `venv/bin/python -c "import quickjs; quickjs.Context().eval('(function(){' + open('dash/static/dash.js').read() + '})')"`.
 - Any new report-specific query goes through `cq()` / `cached_query()` or per-fight `get_entry`/`put_entry`; report list and report
   meta are never cached. Batch per-fight requests with aliases; keep per-fight cache keys so live logs refresh only new fights.
-- Console output is the user's audit trail. Record every change in a tagged `CHANGES_<date>.md` and keep this file current.
+- Console output is the user's audit trail. Record every change in a tagged `docs/CHANGES_<date>.md` and keep this file current.
+- File locations come from `path.py` (`CONFIG_DIR`, `DATA_DIR`, `DASHBOARD_DIR`); never build paths from `__file__` in other modules.
 - Tests must stay offline: regenerate fixtures with `python tests/make_fixtures.py` when a query text changes (`--slim` shrinks them).
 
 ## 11. Open items / next steps
 
-- `[ADDED 2026-09-24]` Whole-project review `REVIEW_2026-09-24.md` (32 verified bugs/risks, ranked) and phased `ROADMAP_2026-09-24.md`;
-  visual redesign plan `docs/superpowers/plans/2026-09-24-dashboard-redesign.md` (replicates `serenity-dashboard-rebuilt.html`). Start with review §0.
+- `[CHANGED 2026-09-24]` Folder reorganisation (`config/`, `data/`, `dashboards/`, `docs/`, `path.py`) - see `docs/CHANGES_2026-09-24.md`.
+  `[TODO]` optional second step: move the root modules into a `wcl/` package (touches 12 imports, `python -m wcl.mplus`, systemd, test bootstrap).
+- `[ADDED 2026-09-24]` Whole-project review `docs/reviews/REVIEW_2026-09-24.md` (32 verified bugs/risks, ranked) and phased `docs/ROADMAP_2026-09-24.md`;
+  visual redesign plan `docs/plans/2026-09-24-dashboard-redesign.md` (replicates `dashboards/serenity-dashboard-rebuilt.html`, local only). Start with review §0.
 
-- `[FIXED 2026-09-23]` Everything in `REVIEW_2026-09-23b.md` except `logging`/`mypy`/browser test - see `CHANGES_2026-09-23.md` Follow-up 3.
+- `[FIXED 2026-09-23]` Everything in `docs/reviews/REVIEW_2026-09-23b.md` except `logging`/`mypy`/browser test - see `docs/CHANGES_2026-09-23.md` Follow-up 3.
   Bundle is **v3**, casts entry **v2** (+ `buffs` for externals), consumable casts **v1** (filtered events); `NIGHT_PLAYERS` for bench;
   `_exclude_bosses` in nights.json (Nymrissa Wavecaller). `[CAVEAT]` `"*"` in avoidable.json is special-cased in `load_avoidable()`.
 - `[TODO]` Check the Preparation table once against a pull you know: pre-pot window is 5 s before → 1.5 s after the pull
@@ -241,7 +254,9 @@ combat-log realm names to slugs via WCL's server list. `[CAVEAT]` Only an in-gam
 9. `[ADDED]` Breaks (idle-based, trash-aware), Raid tab, Home tab with anonymous callouts.
 10. `[ADDED]` Main/open night classification, `nights.json`, `--reports`, `--add-report`, `BOSS_ORDER`.
 11. `[FIXED]` Cache re-download loop (endTime change detection); guardian sources.
-12. `[CHANGED] 2026-09-23` Full rework from `REVIEW_2026-09-23.md`: token leak + .gitignore fixed; `dash/` package; browser is the only
+12. `[CHANGED] 2026-09-23` Full rework from `docs/reviews/REVIEW_2026-09-23.md`: token leak + .gitignore fixed; `dash/` package; browser is the only
     boss-tab renderer; gzip payload (8.3 MB → 1.7 MB); realm-safe identities; fight %; fight bundles + per-fight cache + thread pool;
     time-to-phase, preparation, interrupts/dispels, defensives before first death; accessibility pass; pytest suite with offline fixtures.
-    Details: `CHANGES_2026-09-23.md`.
+    Details: `docs/CHANGES_2026-09-23.md`.
+13. `[CHANGED] 2026-09-24` Folder reorganisation: `config/` (edited), `data/` (generated), `dashboards/` (output), `docs/`; `path.py`.
+    Details: `docs/CHANGES_2026-09-24.md`.

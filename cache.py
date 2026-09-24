@@ -25,9 +25,10 @@ import json
 import os
 import threading
 
+from path import DATA_DIR
 from wcl_client import run_query
 
-CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
+CACHE_DIR = os.path.join(DATA_DIR, "cache")
 
 # Run statistics, so you can see what actually hit the API
 stats = {"api_calls": 0, "cache_hits": 0, "refreshed": 0}
