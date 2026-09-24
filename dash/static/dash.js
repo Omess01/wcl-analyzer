@@ -54,12 +54,21 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
   const GRID = TOK.border;
   const LAYOUT = { paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', font: { color: TOK.ink, family: tok('font') }, margin: { l: 40, r: 20, t: 20, b: 40 },
     xaxis: { gridcolor: GRID, zerolinecolor: GRID }, yaxis: { gridcolor: GRID, zerolinecolor: GRID }, colorway: TOK.series };
+  // --- pure chart helpers (quickjs-testable) ---
+  // Merge the shared LAYOUT with a chart's own layout. Plotly does not grow the top margin for an
+  // in-canvas title, so titled charts keep 50px there unless the caller set its own margin.
+  function chartLayout(base, layout, h) {
+    const lay = Object.assign({}, base, { height: h }, layout || {});
+    if (lay.title && !(layout && layout.margin)) lay.margin = Object.assign({}, base.margin, { t: 50 });
+    return lay;
+  }
+  // --- end pure chart helpers ---
   let chartSeq = 0;
   const charts = [];
   function chart(traces, layout, height) {
     const id = 'dyn_chart_' + (++chartSeq);
     const h = height || 380;
-    charts.push([id, traces, Object.assign({}, LAYOUT, { height: h }, layout)]);
+    charts.push([id, traces, chartLayout(LAYOUT, layout, h)]);
     return `<div class='chart' id='${id}' role='img' style='--h:${h}px'></div>`;   // reserved height: no layout shift while Plotly draws
   }
   function drawCharts() {
