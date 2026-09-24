@@ -3,6 +3,7 @@
 import html
 import json
 import os
+import re
 from collections import Counter, defaultdict
 
 import plotly.graph_objects as go
@@ -12,6 +13,24 @@ from path import CONFIG_DIR, DATA_DIR
 
 AVOIDABLE_FILE = os.path.join(CONFIG_DIR, "avoidable.json")
 MPLUS_FILE = os.path.join(DATA_DIR, "mplus_history.json")
+TOKENS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "tokens.css")
+REQUIRED_TOKENS = frozenset({
+    "surface-page", "surface-card", "surface-raised", "border", "border-strong", "border-control", "ink", "ink-dim",
+    "accent", "on-accent", "good", "warn", "bad",
+    "series-1", "series-1-rgb", "series-2", "series-3", "series-4", "series-5", "series-6",
+    "font", "font-num",
+})
+
+
+def load_tokens() -> dict[str, str]:
+    """Design values from tokens.css: {'accent': '#c9a227', ...}. The CSS file is the only source of truth."""
+    with open(TOKENS_FILE, encoding="utf-8") as f:
+        text = f.read()
+    toks = {name: value.strip() for name, value in re.findall(r"--([a-z0-9-]+)\s*:\s*([^;]+);", text)}
+    missing = sorted(REQUIRED_TOKENS - toks.keys())
+    if missing:
+        raise ValueError(f"tokens.css is missing: {', '.join(missing)}")
+    return toks
 
 PLOTLY_CDN = "https://cdn.plot.ly/plotly-2.35.2.min.js"
 CHART_TEMPLATE = "plotly_dark"

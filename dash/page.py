@@ -163,6 +163,7 @@ def build_html(bosses: dict, args) -> str:
 <title>{esc(guild)} - Raid dashboard {esc(args.start)} to {esc(args.end)}</title>
 <script src='{PLOTLY_CDN}'></script>
 <style>
+{static_file("tokens.css")}
 {static_file("dash.css")}
 </style>
 </head>

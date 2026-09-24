@@ -57,6 +57,7 @@ def test_payload_roundtrip_compressed_and_plain(bosses):
 def test_build_html_structure(bosses, tmp_path):
     html = build_html(bosses, _args())
     assert html.startswith("<!DOCTYPE html>") and "<html lang='en'>" in html
+    assert "--surface-card:" in html and "--ring:" in html   # tokens.css is inlined
     payloads = _payloads(html)
     assert len(payloads) == len(bosses)
     for tab in payloads:
@@ -95,3 +96,52 @@ def test_js_syntax():
     src = static_file("dash.js")
     ctx = quickjs.Context()
     ctx.eval("(function(){\n" + src + "\n})")   # parse only
+
+
+def test_tokens_inlined_and_old_variables_gone():
+    css = static_file("dash.css")
+    for old in ("--bg", "--panel", "--panel2", "--text", "--muted", "--blue", "--focus"):
+        assert f"var({old})" not in css and f"{old}:" not in css, old
+    assert "--surface-card:" in static_file("tokens.css")
+
+
+@pytest.mark.xfail(strict=False, reason="dash.css is rewritten onto the type scale in Task 8")
+def test_css_uses_type_scale():
+    css = static_file("dash.css")
+    assert not re.search(r"font-size:\s*\d+px", css), "raw px font sizes; use var(--fs-*)"
+
+
+def _pure_chart_helpers(quickjs):
+    """Evaluate the pure chart helpers from dash.js in quickjs (no DOM). They must sit between the two marker comments."""
+    src = static_file("dash.js")
+    start = src.index("// --- pure chart helpers (quickjs-testable) ---")
+    end = src.index("// --- end pure chart helpers ---")
+    ctx = quickjs.Context()
+    ctx.eval("var TOK = { ink: '#eef1f6', inkDim: '#9aa6bd', border: '#2a3344', borderStrong: '#3a4658', accent: '#c9a227', "
+             "good: '#22c55e', warn: '#fab219', bad: '#f0716f', series: ['#1', '#2', '#3', '#4', '#5', '#6'] };")
+    ctx.eval(src[start:end])
+    return ctx
+
+
+def test_chart_layout_keeps_room_for_plotly_titles():
+    """A layout with an in-canvas title needs the old 50px top margin; untitled charts get the tight 20px."""
+    quickjs = pytest.importorskip("quickjs")
+    ctx = _pure_chart_helpers(quickjs)
+    base = "{ margin: { l: 40, r: 20, t: 20, b: 40 }, font: { color: '#fff' } }"
+    assert ctx.eval(f"chartLayout({base}, {{ title: 'Wipes by phase' }}, 320).margin.t") == 50
+    assert ctx.eval(f"chartLayout({base}, {{ title: {{ text: 'x', y: 0.98 }} }}, 320).margin.t") == 50
+    assert ctx.eval(f"chartLayout({base}, {{ xaxis: {{ title: 'Pull' }} }}, 320).margin.t") == 20
+    # an explicit margin from the caller always wins
+    assert ctx.eval(f"chartLayout({base}, {{ title: 'x', margin: {{ l: 45, r: 20, t: 95, b: 45 }} }}, 320).margin.t") == 95
+    assert ctx.eval(f"chartLayout({base}, {{ title: 'x' }}, 320).height") == 320
+    # the base object is not mutated
+    assert ctx.eval(f"(function(){{ var b = {base}; chartLayout(b, {{ title: 'x' }}, 1); return b.margin.t; }})()") == 20
+
+
+def test_focus_ring_survives_forced_colors_and_table_headers():
+    css = static_file("dash.css")
+    rule = re.search(r"^:focus-visible \{([^}]*)\}", css, flags=re.M).group(1)
+    assert "outline:none" not in rule, "forced-colors mode drops box-shadow; keep a transparent outline instead of none"
+    assert "outline:2px solid transparent" in rule and "var(--ring)" in rule
+    # sortable <th> live inside overflow:hidden tables where an outer shadow is clipped
+    assert re.search(r"th:focus-visible \{[^}]*inset[^}]*\}", css)

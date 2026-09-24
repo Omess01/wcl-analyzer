@@ -20,6 +20,13 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
   const SCROLL = REDUCED ? 'auto' : 'smooth';
   const store = { get: k => { try { return localStorage.getItem(k); } catch (_) { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch (_) { /* file:// without storage */ } } };
 
+  // design tokens: the CSS file is the source; Plotly and inline SVG need the resolved strings
+  const cssRoot = getComputedStyle(document.documentElement);
+  const tok = name => cssRoot.getPropertyValue('--' + name).trim();
+  const TOK = { ink: tok('ink'), inkDim: tok('ink-dim'), border: tok('border'), borderStrong: tok('border-strong'),
+    surfaceCard: tok('surface-card'), surfaceRaised: tok('surface-raised'), accent: tok('accent'),
+    good: tok('good'), warn: tok('warn'), bad: tok('bad'), series: [1, 2, 3, 4, 5, 6].map(i => tok('series-' + i)) };
+
   // ---------------- small helpers ----------------
   const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
   const fmtN = n => n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : Math.round(n).toString();
@@ -44,15 +51,24 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
   const symbolOf = i => SYMBOLS[i % SYMBOLS.length];
 
   // Plotly (dark, transparent) - charts are queued as placeholders and drawn once the HTML is in the DOM
-  const GRID = '#2a2f3a';
-  const LAYOUT = { paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', font: { color: '#e6e6e6' }, margin: { l: 40, r: 20, t: 50, b: 40 },
-    xaxis: { gridcolor: GRID, zerolinecolor: GRID }, yaxis: { gridcolor: GRID, zerolinecolor: GRID }, colorway: ['#7aa2e3', '#d4ad2f', '#8ce0a8', '#e08a8a', '#a990e0', '#e8a86b', '#5ad1c9', '#f0a1d6'] };
+  const GRID = TOK.border;
+  const LAYOUT = { paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', font: { color: TOK.ink, family: tok('font') }, margin: { l: 40, r: 20, t: 20, b: 40 },
+    xaxis: { gridcolor: GRID, zerolinecolor: GRID }, yaxis: { gridcolor: GRID, zerolinecolor: GRID }, colorway: TOK.series };
+  // --- pure chart helpers (quickjs-testable) ---
+  // Merge the shared LAYOUT with a chart's own layout. Plotly does not grow the top margin for an
+  // in-canvas title, so titled charts keep 50px there unless the caller set its own margin.
+  function chartLayout(base, layout, h) {
+    const lay = Object.assign({}, base, { height: h }, layout || {});
+    if (lay.title && !(layout && layout.margin)) lay.margin = Object.assign({}, base.margin, { t: 50 });
+    return lay;
+  }
+  // --- end pure chart helpers ---
   let chartSeq = 0;
   const charts = [];
   function chart(traces, layout, height) {
     const id = 'dyn_chart_' + (++chartSeq);
     const h = height || 380;
-    charts.push([id, traces, Object.assign({}, LAYOUT, { height: h }, layout)]);
+    charts.push([id, traces, chartLayout(LAYOUT, layout, h)]);
     return `<div class='chart' id='${id}' role='img' style='--h:${h}px'></div>`;   // reserved height: no layout shift while Plotly draws
   }
   function drawCharts() {

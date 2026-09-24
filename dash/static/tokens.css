@@ -1,0 +1,54 @@
+:root {
+  color-scheme: dark;
+
+  /* Surfaces. Three steps only, so "raised" always means the same thing. */
+  --surface-page:   #0d1017;
+  --surface-card:   #141925;
+  --surface-raised: #1b2130;
+  --border:         #2a3344;   /* card edges and table rules (decorative) */
+  --border-strong:  #3a4658;   /* emphasised separators, still decorative */
+  --border-control: #5a6a86;   /* chips, pull boxes, tab buttons, selects: >= 3:1 on card (WCAG 1.4.11) */
+
+  /* Ink. Two tiers, both AA on every surface above (16.8:1 and 7.2:1). */
+  --ink:      #eef1f6;
+  --ink-dim:  #9aa6bd;
+
+  /* Serenity gold. 7.26:1 on card. */
+  --accent:   #c9a227;
+  --on-accent: #17130a;
+
+  /* Status. Reserved for state, never reused as a series colour. */
+  --good:     #22c55e;
+  --warn:     #fab219;
+  --bad:      #f0716f;
+
+  /* Chart series. 1 and 2 validated for CVD in the example; 3-6 added for bosses
+     pulled on more than two nights. Every series also carries a dash pattern and marker.
+     Series colours are MARK colours (>= 3:1 on card): never use them as text on --surface-raised
+     (series-1 is 4.42:1 and series-2 4.14:1 there). */
+  --series-1: #3987e5;
+  --series-1-rgb: 57,135,229;
+  --series-2: #d95926;
+  --series-3: #a78bfa;
+  --series-4: #2dd4bf;
+  --series-5: #f472b6;
+  --series-6: #94a3b8;
+
+  /* Type scale, ~1.25 ratio from a 15px base. */
+  --fs-micro: 0.6875rem;  /* 11px - units and table meta only */
+  --fs-sm:    0.8125rem;  /* 13px */
+  --fs-base:  0.9375rem;  /* 15px */
+  --fs-md:    1.125rem;   /* 18px */
+  --fs-lg:    1.4375rem;  /* 23px */
+  --fs-xl:    1.8125rem;  /* 29px */
+
+  /* Spacing, 4px base. */
+  --sp-1: 0.25rem; --sp-2: 0.5rem;  --sp-3: 0.75rem;
+  --sp-4: 1rem;    --sp-5: 1.5rem;  --sp-6: 2rem;
+
+  --radius: 10px;
+  --ring: 0 0 0 2px var(--surface-page), 0 0 0 4px var(--accent);
+
+  --font: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-num: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Menlo, Consolas, monospace;
+}
