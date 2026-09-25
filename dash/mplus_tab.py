@@ -6,7 +6,7 @@ from datetime import datetime
 
 import plotly.graph_objects as go
 
-from .common import esc, cards, table, fig_html, MPLUS_FILE
+from .common import esc, kpis, table, fig_html, MPLUS_FILE
 
 
 def mplus_tab(n_weeks: int = 8) -> str | None:
@@ -37,7 +37,8 @@ def mplus_tab(n_weeks: int = 8) -> str | None:
         levels = ", ".join(f"+{l}" for l in s["levels"])
         tip = f"{s['count']} runs: {levels}&#10;{s['timed']}/{s['count']} timed&#10;{s['qualifying']} at +{req['level']} or higher"
         state = "met" if s["met"] else "partial" if s["qualifying"] else "none"
-        return (f"<td class='{cls}' data-sort='{s['qualifying']}' title='{esc(tip)}'>"
+        label = f"{s['qualifying']} of {req['runs']} qualifying ({state}); {tip}".replace("&#10;", "; ")
+        return (f"<td class='{cls}' data-sort='{s['qualifying']}' title='{esc(tip)}' aria-label='{esc(label)}'>"
                 f"<b>{s['qualifying']}/{req['runs']}</b><span class='sub'>+{s['highest']} &middot; {s['count']} runs &middot; {state}</span></td>")
 
     rows = ""
@@ -77,7 +78,7 @@ def mplus_tab(n_weeks: int = 8) -> str | None:
     timed = " timed" if req["timed"] else ""
     return f"""
     <h1>Mythic+ <span class='diff'>weekly requirement</span></h1>
-    {cards([
+    {kpis([
         ("Requirement", f"{req['runs']} x +{req['level']}{timed} / week"),
         ("Met this week", f"{met_now} / {len(players)}"),
         ("Missing this week", len(players) - met_now),
@@ -87,6 +88,7 @@ def mplus_tab(n_weeks: int = 8) -> str | None:
     highest key and total runs that week; hover for every key level. Green = met, amber = partial, red = none.
     "?" = before tracking started. Change the rule with <code>MPLUS_REQUIRED_RUNS</code>, <code>MPLUS_REQUIRED_LEVEL</code>
     and <code>MPLUS_REQUIRE_TIMED</code> in .env. Run <code>python mplus.py</code> weekly, before reset.</p>
+    <h2>Per player</h2>
     <label class='filter'><input type='checkbox' id='mpOnlyMissing'> Show only players missing this week's requirement</label>
     {tbl}
     {heat}

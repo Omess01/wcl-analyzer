@@ -9,10 +9,14 @@ import json
 from collections import Counter
 
 from collect_data import NIGHT_FIGHTS, normalize
-from .common import (esc, fmt_duration, pct_color, detect_breaks, break_minutes, avoidable_set, ignore_set, pull_specs)
+from .common import (esc, fmt_duration, hp_band, detect_breaks, break_minutes, avoidable_set, ignore_set, pull_specs)
 
 CONSUMABLE_ORDER = ["flask", "food", "vantus", "rune", "prepot"]
 USE_ORDER = ["combat_potion", "healing_potion", "healthstone", "mana_potion"]
+
+
+# loading placeholder inside #detail_tabN until the payloads are inflated (dash.js removes it)
+SKELETON = "<div class='skeleton' aria-hidden='true'><span></span><span></span><span></span></div>"
 
 
 def pull_grid(pulls: list[dict], tab_id: str) -> str:
@@ -28,10 +32,8 @@ def pull_grid(pulls: list[dict], tab_id: str) -> str:
     breaks_after = {br["after"]: br["gap_min"] for br in detect_breaks(pulls)}
     boxes = ""
     for idx, p in enumerate(pulls, start=1):
-        if p["kill"]:
-            color, label, cls = "#2e8b57", "KILL", "kill"
-        else:
-            color, label, cls = pct_color(p["boss_percentage"]), f"{p['boss_percentage']:.1f}%", "wipe"
+        cls = hp_band(p["boss_percentage"], p["kill"])
+        label = "KILL" if p["kill"] else f"{p['boss_percentage']:.1f}%"
         fp = p.get("fight_percentage")
         fight_line = (f"<div class='pb-fight' title='fight progress left (WCL fight %, accounts for phases)'>fight {fp:.0f}%</div>"
                       if (not p["kill"] and fp is not None and abs(fp - p["boss_percentage"]) > 1) else "")
@@ -40,9 +42,9 @@ def pull_grid(pulls: list[dict], tab_id: str) -> str:
         aria = (f"Pull {idx}, {label}{'' if p['kill'] else ' boss HP left'}, {esc(p['night'])} {esc(p['pull_time'])}, "
                 f"{fmt_duration(p['duration_seconds'])}, {deaths} deaths" + (f", ended in {esc(p['phase'])}" if p.get("phase") else ""))
         boxes += (
-            f"<button type='button' class='pull-box {cls}' data-idx='{idx}' data-night='{esc(p['night'])}' style='border-left-color:{color}' "
+            f"<button type='button' class='pull-box {cls}' data-idx='{idx}' data-night='{esc(p['night'])}' "
             f"aria-pressed='false' aria-label='{aria}. Click to inspect' title='Pull #{idx} - {esc(p['report_title'])} - fight {p['fight_id']} - click to inspect'>"
-            f"<div class='pb-pct' style='color:{color}'>{label}</div>"
+            f"<div class='pb-pct'>{label}</div>"
             f"<div class='pb-meta'>#{idx} &middot; {esc(p['night'][4:])} {esc(p['pull_time'])}</div>"
             f"<div class='pb-meta pb-more'>{fmt_duration(p['duration_seconds'])} &middot; {deaths} <span aria-hidden='true'>&#8224;</span></div>"
             f"{fight_line}{phase}</button>"
@@ -52,15 +54,17 @@ def pull_grid(pulls: list[dict], tab_id: str) -> str:
                       f"<span class='pb-break-label'>break</span>{breaks_after[idx]:.0f} min</div>")
     has_phase = any(p.get("phase") for p in pulls)
     has_fp = any((not p["kill"]) and p.get("fight_percentage") is not None and abs(p["fight_percentage"] - p["boss_percentage"]) > 1 for p in pulls)
-    legend = ("<div class='grid-legend muted'>each box: <b>boss HP left</b> (or KILL; red = far from a kill, green = close) &middot; #pull &middot; date and start time &middot; "
+    swatches = " ".join(f"<i class='swatch {b}' aria-hidden='true'></i> {t} &middot;"
+                        for b, t in (("kill", "Kill"), ("near", "Under 10 %"), ("mid", "10-40 %"), ("far", "40 % and more")))
+    legend = ("<p class='section-note grid-legend'>boss HP left: " + swatches + " each box: #pull &middot; date and start time &middot; "
               "duration &middot; deaths"
               + (" &middot; <span class='pb-fight'>fight %</span> = WCL fight progress left when it differs from boss HP (phases, council bosses)" if has_fp else "")
-              + (" &middot; <span class='pb-phase'>phase the pull ended in</span>" if has_phase else "") + "</div>")
+              + (" &middot; <span class='pb-phase'>phase the pull ended in</span>" if has_phase else "") + "</p>")
     return (f"<div class='chips'>{chips}<label class='filter' style='margin:0'><input type='checkbox' class='compactGrid'> compact grid</label>"
-            f"<span class='muted chip-hint'>click a pull to inspect it &middot; ctrl/shift-click to add &middot; Esc clears</span></div>"
+            f"<span class='hint muted'>click a pull to inspect it &middot; ctrl/shift-click to add &middot; Esc clears</span></div>"
             f"{legend}"
             f"<div class='pull-grid' data-tab='{tab_id}' role='group' aria-label='Pulls'>{boxes}</div>"
-            f"<div class='pull-detail open' id='detail_{tab_id}' aria-live='polite'></div>")
+            f"<div class='pull-detail open' id='detail_{tab_id}' aria-live='polite'>{SKELETON}</div>")
 
 
 def _death_payload(d: dict, first: bool) -> dict:

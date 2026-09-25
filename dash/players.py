@@ -2,7 +2,7 @@
 
 from collections import Counter
 
-from .common import esc, table, avoidable_set, player_stats
+from .common import esc, empty_state, table, avoidable_set, player_stats, player_cell
 
 
 def players_tab(bosses: dict, avoidable_cfg: dict) -> str:
@@ -34,7 +34,7 @@ def players_tab(bosses: dict, avoidable_cfg: dict) -> str:
 def player_table_lowpart(stats: dict, show_avoidable: bool) -> str:
     """Players tab table with low-participation rows tagged for hiding."""
     if not stats:
-        return "<p class='muted'>No data.</p>"
+        return empty_state("players", "no boss pulls in this selection")
     max_pulls = max(s["pulls"] for s in stats.values()) or 1
     hidden = sum(1 for s in stats.values() if s["pulls"] < 0.25 * max_pulls)
     rows = ""
@@ -45,11 +45,11 @@ def player_table_lowpart(stats: dict, show_avoidable: bool) -> str:
         low = " class='lowpart'" if s["pulls"] < 0.25 * max_pulls else ""
         avoid_col = f"<td data-sort='{s['avoid_hits'] / n:.2f}'>{s['avoid_hits'] / n:.1f}</td>" if show_avoidable else ""
         rows += (
-            f"<tr{low}><td class='{esc(s['class'])}'>{esc(name)}</td><td>{esc(s['class'])}</td><td>{s['pulls']}</td>"
+            f"<tr{low}><td>{player_cell(name, s['class'])}</td><td>{s['pulls']}</td>"
             f"<td>{s['bosses']}</td><td>{s['first_deaths']}</td><td data-sort='{rate:.3f}'>{rate * 100:.0f}%</td>"
             f"{avoid_col}<td>{esc(cause)}</td></tr>"
         )
-    headers = [("Player", "str"), ("Class", "str"), ("Pulls", "num"), ("Bosses", "num"),
+    headers = [("Player", "str"), ("Pulls", "num"), ("Bosses", "num"),
                ("First death", "num"), ("Started the wipe in % of pulls", "num")]
     if show_avoidable:
         headers.append(("Avoidable hits / pull", "num"))

@@ -49,3 +49,13 @@ def test_tokens_contrast():
     # series colours are mark colours: 3:1 on the card is enough, they are never used as text on raised
     for i in range(1, 7):
         assert _ratio(t[f"series-{i}"], t["surface-card"]) >= 3.0, f"series-{i}"
+
+
+def test_type_floor_12px():
+    """Final review 5: the smallest step of the type scale is the 12 px floor."""
+    import re
+    from dash.page import static_file
+    toks = static_file("tokens.css")
+    assert re.search(r"--fs-micro:\s*0\.75rem;", toks)
+    for rem in re.findall(r"--fs-[a-z]+:\s*([\d.]+)rem", toks):
+        assert float(rem) >= 0.75, rem

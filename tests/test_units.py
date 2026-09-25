@@ -145,3 +145,12 @@ def test_detect_breaks_ignores_trash_time(monkeypatch):
     collect_data.NIGHT_FIGHTS[night] = [[300_000, 720_000, False]]
     brs = detect_breaks(pulls)
     assert len(brs) == 1 and brs[0]["after"] == 2 and round(brs[0]["gap_min"]) == 10
+
+
+def test_hp_band_thresholds():
+    """Python twin of dash.js hpBand (Task 11): kill, < 10 near, < 40 mid, else far."""
+    from dash.common import hp_band
+    assert hp_band(0.0, kill=True) == "kill" and hp_band(55, kill=True) == "kill"
+    assert hp_band(7) == "near" and hp_band(9.9) == "near"
+    assert hp_band(10) == "mid" and hp_band(25) == "mid" and hp_band(39.9) == "mid"
+    assert hp_band(40) == "far" and hp_band(60) == "far" and hp_band(100) == "far"

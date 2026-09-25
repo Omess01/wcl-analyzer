@@ -40,7 +40,7 @@ cache.py             On-disk JSON cache in data/cache/: cached_query (sha1(query
 fetch_reports.py     Guild report list for a date range (NEVER cached)
 collect_data.py      All data collection -> {(boss, difficulty): [pull, ...]}  (see §5)
 path.py              Folder layout constants (import from here, never compute paths from __file__ elsewhere)
-dash/common.py       esc/fmt, avoidable config, roles/specs, table()/cards()/gotab(), fig_html, breaks, all_pulls, player_stats
+dash/common.py       esc/fmt, avoidable config, roles/specs, table()/kpis()/player_cell()/empty_state()/gotab(), fig_html, breaks, all_pulls, player_stats
 dash/payload.py      pull_grid() (server-rendered click surface) + pull_payload() (compact per-pull JSON, gzip+base64)
 dash/home.py         Home tab: progress strip, insights(), last night
 dash/raid.py         Raid tab: night report, attendance, parse table, kill-time trend
@@ -49,6 +49,7 @@ dash/mplus_tab.py    Mythic+ tab + update_mplus_if_stale()
 dash/page.py         Page assembly: header, toolbar, ARIA tablist, panels, inlines static/dash.css + static/dash.js
 dash/static/dash.js  THE renderer for boss tabs (all sections) + global filters + Players-tab dynamic view
 dash/static/dash.css Styles (dark theme, WoW class colours lightened for contrast, focus rings, reduced motion, responsive)
+dash/static/tokens.css  Design tokens (the ONLY place colours/type/spacing live; Python load_tokens(), JS TOK read it)
 config/              Files YOU edit (tracked, except nights.json and roster.txt which are per-guild and ignored)
   avoidable.json       Per-boss avoidable abilities + _ignore (+ _uncertain checklist)
   consumables.json / defensives.json   optional name-pattern overrides (defaults built in; *.example.json provided)
@@ -71,7 +72,7 @@ legacy/merge_pulls.py  superseded early CLI
 python -m venv venv && source venv/bin/activate.fish     # fish shell!
 pip install -r requirements.txt                          # requests, python-dotenv, plotly (+ pytest, quickjs for tests)
 python build_dashboard.py 2026-08-23 2026-09-21          # -> dashboards/dashboard_<start>_to_<end>.html
-python -m pytest -q                                      # 15 tests, offline
+python -m pytest -q                                      # 94 tests, offline
 ```
 
 CLI (`build_dashboard.py`): `--difficulty ...` (default `DIFFICULTIES` in .env, else heroic mythic) · `--zone` · `--boss` · `--player` ·
@@ -157,6 +158,22 @@ Console prints per report: night type, `[new report] / [unchanged - cached] / [c
 payload; Python emits the pull grid + payload. Reason: the Python and JS versions of every table/chart had drifted and doubled the
 file size. Home, Raid, Players (static part) and Mythic+ stay Python-rendered (Plotly `to_html`).
 
+**Design system** `[CHANGED 2026-09-24]`: visual system replicated from `serenity-dashboard-rebuilt.html`. Tokens in `dash/static/tokens.css`
+(surfaces, ink, accent `#c9a227`, status, six series colours, 15 px base type, 4 px spacing). Patterns: `kpis()` / `kpisHtml()` KPI tiles,
+`.progress-grid .boss` cards, `article.insight` with `Good/Watch/Note` badge + jump button, `table()` / `tbl()` = `.scroller` + visible caption +
+`<th><button>` sorting via `aria-sort`, `player_cell()` / `playerCell()`, `figure.chart` around every chart. The boss-HP progression chart is inline
+SVG (`drawProgression`); all other charts are Plotly styled from the tokens. `tests/test_dashboard.py::test_no_raw_colours_outside_tokens` forbids
+hex literals in `dash.js` and `dash/*.py`. Density defaults (`limit`, rows past it behind "Show all N"): 10 per role table (Damage / Healing done), 15 in the player tables
+(Deaths → Players, Damage taken → Players, Preparation, Interrupts & dispels, Players tab), 12 abilities; box plot capped at 15, line chart top 6.
+Charts with < 4 values (lines, histograms, every box) or < 2 non-zero bar categories fall back to a sentence (`chart()` / `fig_html()` skip
+rule, applied where the call site passes a `fallback`; every Deaths chart and the box plot do). Pull boxes, SVG points
+and the grid legend share four HP bands: kill / near (< 10 %) / mid (< 40 %) / far, via `hp_band()` / `hpBand`; change both together.
+Page chrome: `header.page`, a toolbar that scrolls away (a `<details class='filters'>` disclosure, closed on phones, summary "Filters (n active)"),
+a sticky `nav.tabnav` (the strip wraps into rows on desktop, `--tabnav-h` is measured by `dash.js`; tab `<select>` with optgroups under
+700 px), a loading skeleton with the tab strip `inert` until `dashReady` (tab wiring happens before the payloads inflate; a payload that
+cannot be decoded empties only its own tab), and
+`footer.page` with the build info.
+
 **Payload** (`dash/payload.py`): `<script type='application/gzip+base64' id='data_tabN'>` — gzip+base64 JSON, inflated with
 `DecompressionStream`; `--uncompressed` embeds `application/json`. Per pull: `i,n,t,k,p (boss HP%),fp (fight%),d,a,o,ph,pt,code,fid,
 parts,specs,parses,deaths (recap capped 8; first death has hc/def/cs),dt [[player,ability,hits,amount,(times for avoidable)]],dd,hd,
@@ -166,29 +183,33 @@ ir,ds,cons {name:[flags in cats order]},hx`. Boss level: `boss,diff,avoidable,ig
 Tabs are an ARIA tablist with arrow-key navigation; deep links `#tabN` and `#tabN:section` (`prog,sum,dd,hd,deaths,dt,prep,util`).
 
 **Toolbar**: Nights (when both types exist) · Raid night · Player · clear · wide (persisted in localStorage). Filters apply to every
-boss tab (badges, greyed-out bosses, jump to first boss with pulls) and to the Players tab. Esc clears.
+boss tab (badges, greyed-out bosses, jump to first boss with pulls) and to the Players tab. Esc clears. `[CHANGED 2026-09-24]` not sticky;
+a `<details class='filters'>` (open on desktop, closed under 700 px) whose summary counts the active filters.
 
-**Home**: per night type: headline cards; progress strip (buttons); **Progression by first kills** (`progression_timeline()`: step chart
+**Home**: per night type: KPI tiles; progress cards (buttons); **Progression by first kills** (`progression_timeline()`: step chart
 of bosses killed at least once per raid night, one trace per difficulty + table with first-kill night / pulls / nights per boss in zone
 order); "Worth a look" callouts: progression trend (median of 3 best
 pulls per night), pulls reaching the deepest phase, top wipe-starter, share of first deaths with no defensive cast, wipe-starter
 outlier, avoidable outlier, flask/food missing, idle share of last night, regulars missing, avoidable-list review flags (with
 difficulty), M+ met/total. `[DECISION]` default `anonymous`; `named` = private RL build; `off`.
 
-**Boss tab sections (JS, in order)**: Pulls grid (boss HP %, fight % line when it differs >1 pt, phase, breaks) · cards ·
-Progression (HP chart, breaks table, **Phases**: wipes by phase + **time-to-phase** chart/table, per-night table) · Summary ·
-Damage done / Healing done (role groups, parse, active DPS, median/best, box plot) · Deaths (first-death cards incl. "no defensive
+**Boss tab sections (JS, in order)**: Pulls grid (boss HP band, fight % line when it differs >1 pt, phase, breaks) · KPI tiles ·
+Progression (inline-SVG HP chart + "Show the N pulls as a table", breaks table, **Phases**: wipes by phase + **time-to-phase** chart/table, per-night table) · Summary ·
+Damage done / Healing done (role groups, parse, active DPS, median/best, box plot) · Deaths (first-death KPI tiles incl. "no defensive
 cast", charts, histogram, players table, first-death table with **Defensives cast** + recap incl. casts; single pull = all deaths) ·
-Damage taken (cards, charts, heatmap, avoidable timing histogram, players table with Role + Hide tanks, abilities table with Cast by /
-Who gets hit / ⚠ review) · **Preparation** (flask/food/rune/prepot per player) · **Interrupts & dispels**. Player filter adds the
-focus block. All tables sortable (click / Enter). Charts are drawn one by one; failures show in the `#jsError` banner at the top.
+Damage taken (KPI tiles, charts, heatmap, avoidable timing histogram, players table with Role + Hide tanks, abilities table with Cast by /
+Who gets hit / "review" tag) · **Preparation** (flask/food/rune/prepot per player) · **Interrupts & dispels**. Player filter adds the
+focus block. All tables sortable (header buttons). Charts are drawn one by one; failures show in the `#jsError` banner at the top.
+Section headings are `h2` / `h3` (no `h4`/`h5` in `dash.js`); Plotly titles are `<h3>` above the plot, never in the canvas; no modebar.
 
 **Raid tab**: night report (idle/trash aware), attendance matrix (main nights), average parse across kills, farm kill times.
 `[DECISION]` no raw cross-boss sums.
 
 **Accessibility**: `[ADDED 2026-09-23]` tablist roles, real buttons for pull boxes/progress boxes/gotab links, focus rings, sortable
-headers focusable with `aria-sort`, sr-only captions, skip link, lightened class/parse colours (≥4.5:1 on `#181b22`), 12 px minimum,
-44 px tab buttons, `prefers-reduced-motion`, responsive toolbar/grids at ≤700 px, horizontally scrolling table wrappers.
+headers are `<button>`s with `aria-sort` on the `th`, visible captions (`[CHANGED 2026-09-24]`, were sr-only), skip link, lightened class/parse
+colours on the card surface, 12 px minimum (`--fs-micro`), 44 px tab buttons, `prefers-reduced-motion`, responsive
+toolbar/grids at ≤700 px, horizontally scrolling `.scroller` table wrappers, status never carried by colour alone (HP bands with swatch legend,
+prep glyphs + sr-only word, visible "review" tag).
 `[CAVEAT]` Plotly's `cleanData` throws on keys present with value `undefined` (e.g. `marker: undefined`) — only set keys when defined.
 
 ## 8. Avoidable-damage config (`avoidable.json`)
@@ -198,7 +219,7 @@ Names matched case/punctuation-insensitively. `[DECISION]` removed as raid-wide 
 Caustic Surge, Plague Froth, Congealing Bolt, Toxic Droplets, Unstable Miasma, Clinging Murk, Noxious Blast, Blink Nova, Mighty Thud,
 Venomous Surge, Raging Crosswinds, Venom Rupture, Fangs of the Coiled Altar, Toxic Fumes; Stone Breaker removed as tank mechanic.
 **Kept although raid-wide:** Putrid Membrane, Unchecked Rage (fail-triggered). `[CAVEAT]` Only Ula'tek was researched from guides;
-the ⚠ flags in the ability tables are the review tool. Rattler Slam (Ula'tek) is currently flagged too — review.
+the "review" tags (formerly ⚠) in the ability tables are the review tool. Rattler Slam (Ula'tek) is currently flagged too — review.
 
 ## 9. Mythic+ (`mplus.py`)
 
@@ -208,11 +229,20 @@ combat-log realm names to slugs via WCL's server list. `[CAVEAT]` Only an in-gam
 
 ## 10. Conventions
 
-- Python 3.12+ (user runs 3.14). HTML by string concatenation with `esc()`; `table(headers, rows_html, extra_class, caption)` wraps in
-  `.tw` and makes headers sortable/focusable; `cards()`; `gotab()` for in-page tab links (buttons, not anchors).
-- JS: one IIFE in `dash/static/dash.js`; `chart(traces, layout, height)` queues Plotly draws for `drawCharts()`; state `G` (global
-  filters) and `PD[tab] = {data, sel:Set, player, dirty, rendered}`. `tbl()` mirrors Python `table()`. Never leave keys `undefined`
-  in Plotly objects. Syntax-check with `venv/bin/python -c "import quickjs; quickjs.Context().eval('(function(){' + open('dash/static/dash.js').read() + '})')"`.
+- Python 3.12+ (user runs 3.14). HTML by string concatenation with `esc()`; `table(headers, rows_html, extra_class='', caption='', limit=None)`
+  → `.scroller` + visible `<caption>` + `<th><button aria-label='Sort by …'>`, with `limit` a `data-limit` + "Show all N" button;
+  `kpis(items, extra_class='', raw=False)`; `player_cell(name, cls, role='', spec='')`; `fig_html(fig, height=380, div_id=None, fallback=None)`;
+  `empty_state(what, why, action='')`; `section_note(text_html)`; `hp_band(pct, kill=False)`; `gotab()` for in-page tab links (buttons, not anchors).
+- JS: one IIFE in `dash/static/dash.js`; `chart(traces, layout, height, title, fallback)` returns a `figure.chart` and queues the Plotly draw for
+  `drawCharts()` (pure `shouldSkipChart` decides the fallback sentence; `chartLayout` adds axis `automargin`; `narrowLegend` puts legends
+  below the plot at ≤ 700 px, also for the Python-rendered charts at `dashReady`); `tbl(heads, rows, extra, caption, limit)`, `kpisHtml(items, extra)`,
+  `playerCell`, `emptyHtml`, `hpBand`, `prepCell` mirror the Python helpers; state `G` (global filters) and
+  `PD[tab] = {data, sel:Set, player, dirty, rendered}`. Pure helpers live in two marker blocks the tests evaluate in quickjs:
+  `// --- table helpers (quickjs-testable) ---` … `// --- end table helpers ---` and
+  `// --- pure chart helpers (quickjs-testable) ---` … `// --- end pure chart helpers ---`.
+- No hex colours in Python or JS: read TOKENS / TOK. New tables go through table()/tbl(); new KPI strips through kpis()/kpisHtml(); new charts
+  through chart()/fig_html() so they get the figure frame.
+- Never leave keys `undefined` in Plotly objects. Syntax-check with `venv/bin/python -c "import quickjs; quickjs.Context().eval('(function(){' + open('dash/static/dash.js').read() + '})')"`.
 - Any new report-specific query goes through `cq()` / `cached_query()` or per-fight `get_entry`/`put_entry`; report list and report
   meta are never cached. Batch per-fight requests with aliases; keep per-fight cache keys so live logs refresh only new fights.
 - Console output is the user's audit trail. Record every change in a tagged `docs/CHANGES_<date>.md` and keep this file current.
@@ -227,6 +257,15 @@ combat-log realm names to slugs via WCL's server list. `[CAVEAT]` Only an in-gam
   visual redesign plan `docs/plans/2026-09-24-dashboard-redesign.md` (replicates `dashboards/serenity-dashboard-rebuilt.html`, local only). Start with review §0.
   `[ADDED 2026-09-24]` The plan now carries a **UX audit of the real build** (21 findings → task amendments + Tasks 10-12: density defaults,
   status without colour, mobile pass). `[CAVEAT]` headless-Firefox deep-link screenshots need the delayed-`load` copy described in that section.
+- `[CHANGED 2026-09-24]` Redesign Tasks 1-12 done and visually verified (Task 9 in `docs/CHANGES_2026-09-24.md`).
+  `[TODO]` Replace the remaining Plotly charts with inline SVG if the CDN dependency should go (the example has none); box plots and heatmaps are the hard ones.
+  `[TODO]` The example shows an ilvl column in Damage done; the payload has no item level yet (CombatantInfo carries it).
+  `[TODO]` Roadmap 4.4 per-tab inflation replaces the skeleton with real content sooner.
+  `[TODO]` Boss-tab height: the 2-pull fixture boss (`#tab2`) is ~13,150 px tall at 1440 px, far over the plan's ≤ 3,500 px target. Measured causes, largest
+  first (final review): the Damage taken Abilities rows (3-4-line "Who gets hit" cells), the near-empty Deaths charts (now sentences), the six
+  role tables (Damage done + Healing done × DPS/Tanks/Healers) with two-line player cells, the uncapped Preparation / Interrupts tables (now 15),
+  and the SVG progression chart scaled ~1.5× (viewBox capped at 920 in a ~1,500 px host). `div.plot` min-height is not a cause. Next step:
+  collapse the low-value role tables behind `details.table-view`.
 
 - `[FIXED 2026-09-23]` Everything in `docs/reviews/REVIEW_2026-09-23b.md` except `logging`/`mypy`/browser test - see `docs/CHANGES_2026-09-23.md` Follow-up 3.
   Bundle is **v3**, casts entry **v2** (+ `buffs` for externals), consumable casts **v1** (filtered events); `NIGHT_PLAYERS` for bench;
@@ -235,8 +274,8 @@ combat-log realm names to slugs via WCL's server list. `[CAVEAT]` Only an in-gam
   (`PREPOT_BEFORE_MS/AFTER_MS`), rune patterns are guesses for this expansion (`consumables.json`).
 
 - `[TODO]` User: add `DIFFICULTIES=normal,heroic,mythic` to `.env` (Claude Code cannot edit it); revoke the leaked token (see CHANGES).
-- `[TODO]` Visual check of the deeper boss-tab sections in a real browser (headless Firefox only captures from the top); the 12,000 px
-  overview showed every section rendering, but spacing of the Phases grid and the Preparation table was not inspected up close.
+- `[TODO]` Visual check of the deeper boss-tab sections in a real (non-headless) browser, including sticky tab / section nav while scrolling;
+  `[CHANGED 2026-09-24]` the 14,000 px Task 9 capture was inspected section by section (Phases, Preparation and Interrupts look right).
 - `[TODO]` Consumable / defensive name patterns are educated defaults for this expansion — check the Preparation table against a
   known-good pull and adjust `consumables.json` (rune name!) / `defensives.json`.
 - `[TODO]` Optional: weekly cron/systemd build + Discord post; hosting (GitHub/Cloudflare Pages) would remove the size ceiling entirely.
@@ -262,3 +301,4 @@ combat-log realm names to slugs via WCL's server list. `[CAVEAT]` Only an in-gam
     Details: `docs/CHANGES_2026-09-23.md`.
 13. `[CHANGED] 2026-09-24` Folder reorganisation: `config/` (edited), `data/` (generated), `dashboards/` (output), `docs/`; `path.py`.
     Details: `docs/CHANGES_2026-09-24.md`.
+14. `[CHANGED] 2026-09-24` Dashboard redesign (Tasks 1-12 of `docs/plans/2026-09-24-dashboard-redesign.md`) — details: `docs/CHANGES_2026-09-24.md`.

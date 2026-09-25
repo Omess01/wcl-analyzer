@@ -7,11 +7,13 @@ from collections import Counter, defaultdict
 import plotly.graph_objects as go
 
 from collect_data import NIGHT_FIGHTS, NIGHT_PLAYERS, normalize
-from .common import (esc, fmt_duration, pct_color, cards, table, gotab, fig_html, median, avoidable_set, player_roles,
+from .common import (esc, empty_state, fmt_duration, kpis, section_note, table, gotab, fig_html, median, avoidable_set, player_roles,
                      all_pulls, filter_bosses_by_type, regulars, player_stats, boss_status, night_stats, MPLUS_FILE,
                      LINE_DASHES, MARKERS)
 
-SEVERITY_LABEL = {"warn": "warning", "good": "good", "info": "note"}
+SEVERITY_LABEL = {"warn": "Watch", "good": "Good", "info": "Note"}
+CHECK_SVG = ("<svg width='14' height='14' viewBox='0 0 16 16' aria-hidden='true'><path d='M2 8.5l4 4 8-9' fill='none' "
+             "stroke='currentColor' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/></svg>")
 
 
 def progress_strip(ordered: list) -> str:
@@ -21,16 +23,16 @@ def progress_strip(ordered: list) -> str:
             continue
         s = boss_status(pulls)
         if s["killed"]:
-            top = "<div class='ps-top kill'>&#10003; killed</div>"
-            sub = f"{s['kills']} kill{'s' if s['kills'] != 1 else ''} &middot; first {esc(s['first_kill'][4:])} &middot; {s['prog_pulls']} pulls to kill"
+            head = f"<span class='head'>{CHECK_SVG}Killed</span>"
+            sub = f"{s['kills']} kill{'s' if s['kills'] != 1 else ''} &middot; first {esc(s['first_kill'][4:])} &middot; {s['prog_pulls']} pull{'s' if s['prog_pulls'] != 1 else ''} to kill"
             cls = "killed"
         else:
-            top = f"<div class='ps-top' style='color:{pct_color(s['best'])}'>{s['best']:.1f}% best</div>"
-            sub = f"{s['pulls']} pulls &middot; last {esc(s['last_night'][4:])}"
-            cls = "prog"
-        boxes += (f"<button type='button' class='ps-box {cls} gotab' data-tab='tab{i}'><div class='ps-name'>{esc(name)} <span class='diff'>{esc(diff)}</span></div>"
-                  f"{top}<div class='ps-sub'>{sub}</div></button>")
-    return f"<div class='progress-strip'>{boxes}</div>"
+            head = f"<span class='head'>{s['best']:.1f}% best</span>"
+            sub = f"{s['pulls']} pull{'s' if s['pulls'] != 1 else ''} &middot; last {esc(s['last_night'][4:])}"
+            cls = "progress"
+        boxes += (f"<button type='button' class='boss {cls} gotab' data-tab='tab{i}'>"
+                  f"<span class='name'>{esc(name)} <span class='diff'>{esc(diff)}</span></span>{head}<span class='sub'>{sub}</span></button>")
+    return f"<div class='progress-grid'>{boxes}</div>"
 
 
 def progression_timeline(ordered: list) -> str:
@@ -86,14 +88,14 @@ def progression_timeline(ordered: list) -> str:
     max_total = max(len(b) for b in by_diff.values())
     fig.update_layout(title="Bosses killed at least once, by raid night (first kills, per difficulty)",
                       yaxis=dict(title="Bosses down", range=[0, max_total + 0.6], dtick=1), xaxis=dict(title="Raid night"),
-                      legend=dict(orientation="h", y=1.08, x=0), margin=dict(l=45, r=60, t=80, b=45))
-    return (fig_html(fig, height=320)
+                      legend=dict(orientation="h", y=1.08, x=0), margin=dict(l=45, r=60, t=30, b=45))
+    return (section_note("Progression measured by first kills: how many bosses of each difficulty had gone down at least once by "
+                         "the end of each night, and what the first kill of each boss cost. Bosses are in zone order.")
+            + fig_html(fig, height=320)
             + "<details><summary class='muted'>First kill per boss and difficulty (table)</summary>"
             + table([("Difficulty", "str"), ("Boss", "str"), ("First kill", "num"), ("Pulls to first kill", "num"),
                      ("Nights to first kill", "num"), ("Since", "str")], rows, caption="First kill per boss and difficulty")
-            + "</details>"
-            + "<p class='muted'>Progression measured by first kills: how many bosses of each difficulty had gone down at least once by the end of "
-              "each night, and what the first kill of each boss cost. Bosses are in zone order.</p>")
+            + "</details>")
 
 
 def _night_score(pulls: list[dict]) -> float:
@@ -102,9 +104,9 @@ def _night_score(pulls: list[dict]) -> float:
     return median(best3)
 
 
-def insights(bosses: dict, ordered: list, avoidable_cfg: dict, mode: str = "anonymous") -> list[tuple[str, str, str]]:
+def insights(bosses: dict, ordered: list, avoidable_cfg: dict, mode: str = "anonymous") -> list[tuple[str, str, str, str | None]]:
     """
-    Rule-based callouts: (severity, title, text). severity: 'good' | 'warn' | 'info'.
+    Rule-based callouts: (severity, title, text, tab_id or None). severity: 'good' | 'warn' | 'info'.
 
     mode controls whether individual players are named on the Home page:
       'named'     - names in the outlier / attendance / M+ cards (a private build for the raid lead)
@@ -147,21 +149,21 @@ def insights(bosses: dict, ordered: list, avoidable_cfg: dict, mode: str = "anon
         if reached:
             deepest = [ph for ph in order if ph in reached][-1]
             txt += f" {reached[deepest]} of {len(prog_pulls)} pulls reached {esc(deepest)}."
-        out.append(("info", f"Progression: {name}", txt + " " + gotab(tab_of[prog_key], "open tab &rarr;")))
+        out.append(("info", f"Progression: {esc(name)}", txt, tab_of[prog_key]))
 
         # wipe-starters on the prog boss
         firsts = [p["deaths"][0] for p in prog_pulls if p["deaths"]]
         if firsts:
             by_c = Counter(d.get("top_contributor", d["ability"]) for d in firsts)
             ab, n_ab = by_c.most_common(1)[0]
-            out.append(("info", "What starts the wipes", f"{esc(ab)} caused {n_ab} of {len(firsts)} first deaths ({n_ab / len(firsts) * 100:.0f}%)."))
+            out.append(("info", "What starts the wipes", f"{esc(ab)} caused {n_ab} of {len(firsts)} first deaths ({n_ab / len(firsts) * 100:.0f}%).", tab_of[prog_key]))
             with_casts = [d for d in firsts if d.get("has_cast_data")]
             if len(with_casts) >= 5:
                 no_def = sum(1 for d in with_casts if not d.get("defensives"))
                 out.append(("info" if no_def / len(with_casts) < 0.5 else "warn",
                             f"{no_def / len(with_casts) * 100:.0f}% of first deaths had no defensive cast in the last seconds",
                             f"{no_def} of {len(with_casts)} first deaths on {esc(name)} show no personal defensive, healthstone or potion "
-                            f"in the death window. The Deaths tables list what was cast."))
+                            f"in the death window. The Deaths tables list what was cast.", tab_of[prog_key]))
             stats = player_stats(prog_pulls)
             regs = regulars(prog_pulls)
             rates = {n: s["first_deaths"] / max(s["pulls"], 1) for n, s in stats.items() if n in regs}
@@ -175,7 +177,7 @@ def insights(bosses: dict, ordered: list, avoidable_cfg: dict, mode: str = "anon
                                 f"{stats[worst_name]['first_deaths']} of {stats[worst_name]['pulls']} pulls, mostly to {esc(cause)}. "
                                 f"Raid median is {med * 100:.0f}%. "
                                 + ("" if named else f"Players table on {esc(name)}, sorted by 'started the wipe'. ")
-                                + "Worth a quiet look at what they were doing at the time - it may be an assignment, not a mistake."))
+                                + "Worth a quiet look at what they were doing at the time - it may be an assignment, not a mistake.", tab_of[prog_key]))
         # avoidable offender
         avoidable = avoidable_set(avoidable_cfg, name)
         if avoidable:
@@ -195,7 +197,7 @@ def insights(bosses: dict, ordered: list, avoidable_cfg: dict, mode: str = "anon
                 if people and med > 0 and worst_rate >= 2 * med and worst_rate >= 1:
                     who = esc(worst_name) if named else "One non-tank"
                     out.append(("warn", f"{who} takes {worst_rate:.1f} avoidable hits per pull",
-                                f"Non-tank median is {med:.1f}. Damage taken heatmap on {esc(name)}."))
+                                f"Non-tank median is {med:.1f}. Damage taken heatmap on {esc(name)}.", tab_of[prog_key]))
         # preparation
         prepared = [(pl, c) for p in prog_pulls for pl, c in (p.get("consumables") or {}).items()]
         if prepared:
@@ -207,9 +209,9 @@ def insights(bosses: dict, ordered: list, avoidable_cfg: dict, mode: str = "anon
             share = sum(miss.values()) / (2 * len(prepared))
             if share > 0.05:
                 out.append(("warn", f"{share * 100:.0f}% of player-pulls on {esc(name)} started without flask or food",
-                            f"Missing flask on {miss['flask']} and food on {miss['food']} of {len(prepared)} player-pulls. Preparation table on the boss tab."))
+                            f"Missing flask on {miss['flask']} and food on {miss['food']} of {len(prepared)} player-pulls. Preparation table on the boss tab.", tab_of[prog_key]))
     elif any(pulls for _, pulls in ordered):
-        out.append(("good", "Full clear", "Every boss in the selection has been killed. Farm kill times are on the Raid tab."))
+        out.append(("good", "Full clear", "Every boss in the selection has been killed. Farm kill times are on the Raid tab.", None))
 
     # --- last night: efficiency
     nights: dict[str, list[dict]] = defaultdict(list)
@@ -224,9 +226,9 @@ def insights(bosses: dict, ordered: list, avoidable_cfg: dict, mode: str = "anon
     idle_share = max(span - combat - trash, 0) / span if span else 0
     if span > 3600 and idle_share > 0.5:
         out.append(("warn", f"Last night was {idle_share * 100:.0f}% idle",
-                    f"{fmt_duration(combat)} on bosses and {fmt_duration(trash)} on trash in {fmt_duration(span)} of raid. Run-backs, breaks and explanations were the rest. Raid tab &rarr; Night report."))
+                    f"{fmt_duration(combat)} on bosses and {fmt_duration(trash)} on trash in {fmt_duration(span)} of raid. Run-backs, breaks and explanations were the rest. Raid tab &rarr; Night report.", None))
     elif span > 3600:
-        out.append(("good", f"Last night: {(1 - idle_share) * 100:.0f}% of raid time fighting", f"{len(ps)} pulls, {fmt_duration(combat)} on bosses, {fmt_duration(trash)} on trash, in {fmt_duration(span)}."))
+        out.append(("good", f"Last night: {(1 - idle_share) * 100:.0f}% of raid time fighting", f"{len(ps)} pulls, {fmt_duration(combat)} on bosses, {fmt_duration(trash)} on trash, in {fmt_duration(span)}.", None))
 
     # --- attendance: regulars who missed the last main night
     main_nights = [n for n in nights if not n.endswith(" open")]
@@ -236,8 +238,8 @@ def insights(bosses: dict, ordered: list, avoidable_cfg: dict, mode: str = "anon
         present = {name for p in nights[last_main] for name in p["participants"]}
         missing = sorted(regs - present)
         if missing and people:
-            out.append(("info", f"{len(missing)} regular{'s' if len(missing) != 1 else ''} missing on {last_main[4:]}",
-                        ", ".join(esc(m) for m in missing) if named else "Raid tab &rarr; Attendance."))
+            out.append(("info", f"{len(missing)} regular{'s' if len(missing) != 1 else ''} missing on {esc(last_main[4:])}",
+                        ", ".join(esc(m) for m in missing) if named else "Raid tab &rarr; Attendance.", None))
 
     # --- avoidable list review flags
     flagged = []
@@ -263,7 +265,7 @@ def insights(bosses: dict, ordered: list, avoidable_cfg: dict, mode: str = "anon
                 flagged.append(f"{ab} ({name} {diff})")
     if flagged:
         out.append(("info", f"{len(flagged)} avoidable-listed abilit{'y' if len(flagged) == 1 else 'ies'} hit the raid like unavoidable damage",
-                    ", ".join(esc(f) for f in flagged[:6]) + (" &hellip;" if len(flagged) > 6 else "") + ". Keep them only if they are fail-triggered raid damage."))
+                    ", ".join(esc(f) for f in flagged[:6]) + (" &hellip;" if len(flagged) > 6 else "") + ". Keep them only if they are fail-triggered raid damage.", None))
 
     # --- M+ requirement
     if os.path.exists(MPLUS_FILE):
@@ -284,7 +286,7 @@ def insights(bosses: dict, ordered: list, avoidable_cfg: dict, mode: str = "anon
                           "Mythic+ tab has the list.")
                 if fresh and missing:
                     detail = f"The week reset {hours_since_reset():.0f} h ago - too early to judge. " + detail
-                out.append((sev, f"Mythic+: {len(met)} of {len(players)} have done {req['runs']} x +{req['level']} this week", detail))
+                out.append((sev, f"Mythic+: {len(met)} of {len(players)} have done {req['runs']} x +{req['level']} this week", detail, None))
         except Exception:
             pass
     return out
@@ -299,7 +301,7 @@ def _delta(cur: float, prev: float | None, fmt, lower_is_better: bool = False, u
         return "<span class='vs'>same as previous night</span>"
     better = (diff < 0) if lower_is_better else (diff > 0)
     glyph = "&#9650;" if diff > 0 else "&#9660;"
-    return (f"<span class='vs' style='color:{'#8ce0a8' if better else '#e08a8a'}'>{glyph} {'+' if diff > 0 else ''}{fmt(diff)}{unit} "
+    return (f"<span class='vs delta {'better' if better else 'worse'}'>{glyph} {'+' if diff > 0 else ''}{fmt(diff)}{unit} "
             f"vs previous night ({fmt(prev)}{unit}) - {'better' if better else 'worse'}</span>")
 
 
@@ -330,8 +332,8 @@ def last_night_panel(bosses: dict, ordered: list) -> str:
     players = {name for p in ps for name in p["participants"]}
     bench = sorted(set(NIGHT_PLAYERS.get(last, {})) - players)
     pct = lambda x: f"{x * 100:.0f}"
-    kpis = [
-        ("Night", f"<span class='card-text'>{esc(last)}</span>"), ("Pulls", str(len(ps))), ("Kills", str(sum(kills.values()))),
+    tiles = [
+        ("Night", esc(last), "text"), ("Pulls", str(len(ps))), ("Kills", str(sum(kills.values()))),
         ("In combat", esc(fmt_duration(combat))), ("Raid time", esc(fmt_duration(span))),
         ("Pulls / hour", f"{cur['pph']:.1f}" + _delta(cur["pph"], before["pph"] if before else None, lambda v: f"{v:.1f}")),
         ("Idle share", f"{pct(cur['idle_share'])}%" + _delta(cur["idle_share"] * 100, before["idle_share"] * 100 if before else None,
@@ -340,49 +342,67 @@ def last_night_panel(bosses: dict, ordered: list) -> str:
     ]
     prep = cur.get("prep")
     if prep is not None:
-        kpis.append(("Flask + food at pull start", f"{pct(prep)}%" + _delta(prep * 100, before["prep"] * 100 if before and before.get("prep") is not None else None,
+        tiles.append(("Flask + food at pull start", f"{pct(prep)}%" + _delta(prep * 100, before["prep"] * 100 if before and before.get("prep") is not None else None,
                                                                           lambda v: f"{v:.0f}", unit="%")))
-    cards_html = "<div class='cards'>" + "".join(
-        f"<div class='card'><div class='card-value'>{v}</div><div class='card-label'>{esc(l)}</div></div>" for l, v in kpis) + "</div>"
+    cards_html = kpis(tiles, raw=True)
     return f"""
     {cards_html}
     {table([("Boss", "str"), ("Pulls", "num"), ("Kills", "num"), ("Best", "str"), ("In combat", "str"), ("Top wipe-starter", "str")], rows, caption="Last raid night per boss")}
     """
 
 
-def home_section(bosses: dict, ordered: list, avoidable_cfg: dict, mode: str, heading: str | None) -> str:
+def home_section(bosses: dict, ordered: list, avoidable_cfg: dict, mode: str, heading: str,
+                 collapsible: bool = False, expanded: bool = True) -> str:
+    """One night type on Home. collapsible=True wraps it in <details class='night-type'> (open only when expanded)."""
     pulls_all = all_pulls(bosses)
     if not pulls_all:
         return ""
     nights = {p["night"] for p in pulls_all}
     killed = sum(1 for _, pulls in ordered if pulls and any(p["kill"] for p in pulls))
     seen = sum(1 for _, pulls in ordered if pulls)
-    cards_html = cards([("Bosses killed", f"{killed} / {seen}"), ("Raid nights", len(nights)), ("Pulls", len(pulls_all)),
-                        ("Time in combat", fmt_duration(sum(p["duration_seconds"] for p in pulls_all))),
-                        ("Players seen", len({n for p in pulls_all for n in p["participants"]}))])
+    combat = fmt_duration(sum(p["duration_seconds"] for p in pulls_all))
+    players = len({n for p in pulls_all for n in p["participants"]})
+    tiles = kpis([("Bosses killed", f"{killed}<span class='unit'>of {seen}</span>", "good" if killed == seen else ""),
+                  ("Raid nights", str(len(nights))), ("Pulls", str(len(pulls_all))),
+                  ("Time in combat", f"{esc(combat)}<span class='unit'>mm:ss</span>"),
+                  ("Players seen", str(players))], raw=True)
     items = insights(bosses, ordered, avoidable_cfg, mode)
-    ins = "".join(f"<div class='insight {sev}'><span class='ins-badge {sev}'>{SEVERITY_LABEL.get(sev, sev)}</span>"
-                  f"<div class='ins-title'>{title}</div><div class='ins-text'>{text}</div></div>" for sev, title, text in items)
-    head = f"<h2 class='home-type'>{esc(heading)}</h2>" if heading else ""
-    sub = "h3" if heading else "h2"
-    return f"""
-    {head}
-    {cards_html}
-    <{sub}>Progress</{sub}>
+    tab_label = {f"tab{i}": name for i, ((name, _diff), _) in enumerate(ordered)}
+    ins = "".join(
+        f"<article class='insight {sev}'><h4><span class='badge'>{SEVERITY_LABEL.get(sev, sev)}</span>{title}</h4><p>{text}</p>"
+        + (gotab(tab, f"Open {esc(tab_label.get(tab, ''))} &rarr;", cls="jump") if tab else "") + "</article>"
+        for sev, title, text, tab in items)
+    progress_note = section_note("Progress boxes open the boss tab. Killed bosses show kills and the cost of the first kill; "
+                                 "open bosses show the best pull so far.")
+    worth_note = section_note("Computed from the logs against fixed thresholds. Not opinions and not a grading"
+                              + (", and no individual is named on this page" if mode == "anonymous" else "")
+                              + ". The per-player detail lives in the tables on the boss tabs.")
+    body = f"""
+    {tiles}
+    <h3>Progress</h3>
+    {progress_note}
     {progress_strip(ordered)}
-    <{sub}>Progression by first kills</{sub}>
+    <h3>Progression by first kills</h3>
     {progression_timeline(ordered)}
-    <{sub}>Worth a look</{sub}>
-    <div class='insights'>{ins or "<p class='muted'>Nothing stands out.</p>"}</div>
-    <{sub}>Last raid night</{sub}>
+    <h3>Worth a look</h3>
+    {worth_note}
+    {f"<div class='insights'>{ins}</div>" if ins else "<p class='muted'>Nothing stands out.</p>"}
+    <h3>Last raid night</h3>
     {last_night_panel(bosses, ordered)}
     """
+    if not collapsible:
+        return f"<h2 class='home-type'>{esc(heading)}</h2>{body}"
+    line = (f"{killed} / {seen} killed &middot; {len(nights)} night{'s' if len(nights) != 1 else ''} &middot; "
+            f"{len(pulls_all)} pull{'s' if len(pulls_all) != 1 else ''} &middot; {esc(combat)} in combat &middot; "
+            f"{players} player{'s' if players != 1 else ''}")
+    return (f"<details class='night-type'{' open' if expanded else ''}><summary><h2 class='home-type'>{esc(heading)}"
+            f"<span class='summary-kpis'> &mdash; {line}</span></h2></summary>{body}</details>")
 
 
 def home_tab(bosses: dict, ordered: list, avoidable_cfg: dict, args) -> str:
     pulls_all = all_pulls(bosses)
     if not pulls_all:
-        return "<p class='muted'>No pulls.</p>"
+        return empty_state("pulls", "no boss pulls in this date range", "widen the range or check --difficulty")
     guild = os.getenv("GUILD_NAME", "Guild")
     mode = getattr(args, "callouts", None) or os.getenv("HOME_CALLOUTS", "anonymous")
     types = []
@@ -391,23 +411,16 @@ def home_tab(bosses: dict, ordered: list, avoidable_cfg: dict, args) -> str:
         if t not in types:
             types.append(t)
     types.sort(key=lambda t: 0 if t == "main" else 1)
-    intro = (f"<p class='muted'>Progress boxes open the boss tab. \"Worth a look\" cards are computed from the data with fixed thresholds - "
-             f"not opinions, and not a grading. "
-             + ("Individuals are named on this page (private build)." if mode == "named" else
-                "No individuals are named on this page; the tables inside have the per-player detail." if mode == "anonymous" else
-                "Cards about individuals are switched off.") + "</p>")
-    if len(types) == 1:
-        body = home_section(bosses, ordered, avoidable_cfg, mode, None)
-    else:
-        labels = {"main": "Main raid nights", "open": "Open nights"}
-        body = ""
-        for t in types:
-            fb = filter_bosses_by_type(bosses, t)
-            f_ordered = [(key, [p for p in pulls if p.get("night_type", "main") == t]) for key, pulls in ordered]
-            body += home_section(fb, f_ordered, avoidable_cfg, mode, labels[t])
+    labels = {"main": "Main raid nights", "open": "Open nights"}
+    body = ""
+    for t in types:
+        fb = filter_bosses_by_type(bosses, t)
+        f_ordered = [(key, [p for p in pulls if p.get("night_type", "main") == t]) for key, pulls in ordered]
+        body += home_section(fb, f_ordered, avoidable_cfg, mode, labels.get(t, t),
+                             collapsible=t == "open", expanded="main" not in types)
     return f"""
     <h1>{esc(guild)} <span class='diff'>{esc(args.start)} to {esc(args.end)}</span></h1>
-    {intro}
     {body}
-    <p class='muted'>Use the pickers at the top to look at another night or a single player; the <b>Raid</b> tab{"s have" if len(types) > 1 else " has"} every night side by side.</p>
+    {section_note("Use the pickers at the top to look at another night or a single player; the <b>Raid</b> tab"
+                  + ("s have" if len(types) > 1 else " has") + " every night side by side.")}
     """

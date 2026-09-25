@@ -6,8 +6,8 @@ from datetime import datetime
 import plotly.graph_objects as go
 
 from collect_data import NIGHT_FIGHTS, NIGHT_PLAYERS, busy_ms_between, get_timezone
-from .common import (esc, fmt_duration, cards, table, fig_html, median, parse_class, break_minutes, all_pulls,
-                     filter_bosses_by_type, pull_specs, spec_role, player_role_labels)
+from .common import (esc, empty_state, fmt_duration, kpis, table, fig_html, median, parse_class, break_minutes, all_pulls,
+                     filter_bosses_by_type, pull_specs, spec_role, player_role_labels, player_cell, TOKENS)
 
 
 def night_report(pulls_all: list[dict]) -> str:
@@ -56,10 +56,10 @@ def night_report(pulls_all: list[dict]) -> str:
         d = dict(pts)
         fig.add_trace(go.Bar(name=bn.split(" (")[0], x=chart_nights, y=[d.get(n, 0) for n in chart_nights]))
     fig.update_layout(barmode="stack", title="Minutes in combat per night, by boss", yaxis_title="Minutes",
-                      legend=dict(orientation="h", y=1.08, x=0), margin=dict(l=45, r=20, t=80, b=45))
+                      legend=dict(orientation="h", y=1.08, x=0), margin=dict(l=45, r=20, t=30, b=45))
     return (table([("Night", "str"), ("Raid time", "str"), ("Bosses (pulls, ✓ = kill)", "str"), ("Pulls", "num"), ("Kills", "num"),
                    ("Boss combat", "num"), ("Trash", "num"), ("Idle", "num"), ("Pulls / hour", "num"), ("Median recovery", "num"),
-                   ("Breaks", "str"), ("Players", "num"), ("Bench", "num")], rows, caption="Night report")
+                   ("Breaks", "str"), ("Players", "num"), ("Bench", "num")], rows, caption="One row per raid night")
             + "<p class='muted'>Raid time runs from the first boss pull to the end of the last one - trash before the first boss isn't counted. "
               "<b>Trash</b> is time in non-boss fights (WCL logs them too). <b>Idle</b> is everything else: run-backs, breaks, talking. "
               f"<b>Median recovery</b> is the typical idle gap from a wipe to the next pull, breaks ({break_minutes():g}+ idle min) excluded; "
@@ -114,13 +114,13 @@ def attendance_matrix(pulls_all: list[dict]) -> str:
                 fp = first_pull.get((name, n), 1)
                 late = f"<span class='sub'>from #{fp}</span>" if fp > 1 else ""
                 late_any = late_any or fp > 1
-                cells += (f"<td class='att' style='background:rgba(122,162,227,{0.12 + 0.5 * share:.2f})' data-sort='{share:.3f}' "
+                cells += (f"<td class='att' style='background:rgba({TOKENS["series-1-rgb"]},{0.12 + 0.5 * share:.2f})' data-sort='{share:.3f}' "
                           f"title='{k} of {tn} pulls{f', first pull #{fp}' if fp > 1 else ''}'>{k}<span class='sub'>/{tn}</span>{late}</td>")
         nights_present = sum(1 for n in nights if c.get(n))
-        rows += (f"<tr{' class=lowpart' if low else ''}><td class='{esc(classes[name])}'>{esc(name)}</td><td class='muted'>{esc(role_labels.get(name, ''))}</td>"
+        rows += (f"<tr{' class=lowpart' if low else ''}><td>{player_cell(name, classes[name], role_labels.get(name, ''))}</td>"
                  f"{cells}<td data-sort='{nights_present}'>{nights_present}/{len(nights)}</td>"
                  f"<td data-sort='{tot / total_pulls:.3f}'>{tot} <span class='muted'>({tot / total_pulls * 100:.0f}%)</span></td></tr>")
-    headers = [("Player", "str"), ("Role", "str")] + [(n[4:], "num") for n in nights] + [("Nights", "num"), ("Pulls", "num")]
+    headers = [("Player", "str")] + [(n[4:], "num") for n in nights] + [("Nights", "num"), ("Pulls", "num")]
     label = (f"<label class='filter'><input type='checkbox' class='showLow'> Show {hidden} hidden player{'s' if hidden != 1 else ''} "
              f"with under 25% of main-night pulls</label>") if hidden else ""
     legend = ("<p class='muted'>&ndash; = not in the raid; <b>bench</b> = in the raid (trash fights) but in no boss pull"
@@ -147,11 +147,11 @@ def parse_table(pulls_all: list[dict]) -> str:
             e["vals"].append(val)
             e["by_boss"].append(f"{p['boss'].split(' (')[0]} {val:.0f}")
     if not per:
-        return "<p class='muted'>No kills with rankings in this range yet.</p>"
+        return empty_state("ranked kills", "WCL only ranks kills, and there are none in this range yet")
     rows = ""
     for name, e in sorted(per.items(), key=lambda kv: -(sum(kv[1]["vals"]) / len(kv[1]["vals"]))):
         avg = sum(e["vals"]) / len(e["vals"])
-        rows += (f"<tr><td class='{esc(e['class'])}'>{esc(name)}</td><td class='muted'>{e['metric'].upper()}</td>"
+        rows += (f"<tr><td>{player_cell(name, e['class'])}</td><td class='muted'>{e['metric'].upper()}</td>"
                  f"<td data-sort='{avg:.1f}' class='{parse_class(avg)}'><b>{avg:.0f}</b></td>"
                  f"<td data-sort='{max(e['vals']):.0f}' class='{parse_class(max(e['vals']))}'>{max(e['vals']):.0f}</td>"
                  f"<td data-sort='{min(e['vals']):.0f}' class='{parse_class(min(e['vals']))}'>{min(e['vals']):.0f}</td>"
@@ -175,15 +175,15 @@ def kill_time_trend(bosses: dict) -> str:
     if not any_trace:
         return ""
     fig.update_layout(title="Kill time on farm bosses, per week (faster = the payoff of better play)", yaxis_title="Kill duration (s)",
-                      legend=dict(orientation="h", y=1.08, x=0), margin=dict(l=45, r=20, t=80, b=45))
-    return "<h3>Farm kill times</h3>" + fig_html(fig, height=360)
+                      legend=dict(orientation="h", y=1.08, x=0), margin=dict(l=45, r=20, t=30, b=45))
+    return "<h3>Farm kill times</h3>" + fig_html(fig, height=360, fallback="Too few farm kills yet for a trend.")
 
 
 def raid_tab(bosses: dict, night_type: str | None = None) -> str:
     bosses = filter_bosses_by_type(bosses, night_type)
     pulls_all = all_pulls(bosses)
     if not pulls_all:
-        return "<p class='muted'>No pulls.</p>"
+        return empty_state("pulls", "no boss pulls on these nights")
     label = {"main": "main raid nights", "open": "open nights", None: "across all bosses"}[night_type]
     nights = len({p["night"] for p in pulls_all})
     combat = sum(p["duration_seconds"] for p in pulls_all)
@@ -194,7 +194,7 @@ def raid_tab(bosses: dict, night_type: str | None = None) -> str:
     <p class='muted'>Nothing here is a sum of boss numbers - those don't compare across fights. This is the raid as an organisation:
     how the nights are spent, who shows up, and the one performance number that is fair across bosses (WCL parse).
     {"Open nights are on their own Raid tab." if night_type == "main" else "Main raid nights are on their own Raid tab." if night_type == "open" else ""}</p>
-    {cards([("Raid nights", nights), ("Pulls", len(pulls_all)), ("Kills", kills), ("Time in combat", fmt_duration(combat)),
+    {kpis([("Raid nights", nights), ("Pulls", len(pulls_all)), ("Kills", kills), ("Time in combat", fmt_duration(combat)),
             ("Different players", len(roster))])}
     <h2>Night report</h2>
     {night_report(pulls_all)}

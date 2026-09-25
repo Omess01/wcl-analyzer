@@ -1,6 +1,7 @@
 """Page assembly: header, toolbar, tab bar, one section per tab, static CSS + JS."""
 
 import os
+import re
 from collections import Counter
 from datetime import datetime
 
@@ -60,9 +61,13 @@ def _tab_button(tab_id: str, label_html: str, extra_class: str = "", active: boo
             f"tabindex='{'0' if active else '-1'}'{attrs}>{label_html}</button>")
 
 
-def _tab_panel(tab_id: str, body: str, active: bool = False) -> str:
+def _tab_panel(tab_id: str, body: str, active: bool = False, busy: bool = False) -> str:
+    busy_attr = " aria-busy='true'" if busy else ""
     return (f"<section id='{tab_id}' class='tab-panel{' active' if active else ''}' role='tabpanel' "
-            f"aria-labelledby='btn_{tab_id}'{'' if active else ' hidden'}>{body}</section>")
+            f"aria-labelledby='btn_{tab_id}'{'' if active else ' hidden'}{busy_attr}>{body}</section>")
+
+
+SIZE_PLACEHOLDER = "@@SIZE_KB@@"   # replaced by the page size once the page is assembled
 
 
 def build_html(bosses: dict, args) -> str:
@@ -79,10 +84,11 @@ def build_html(bosses: dict, args) -> str:
         badge = "✓" if kills else f"{min(p['boss_percentage'] for p in pulls):.0f}%"
         if diff not in diffs_present:
             diffs_present.append(diff)
-        tab_buttons += _tab_button(tab_id, f"{esc(name)} <span class='diff'>{esc(diff)}</span> <span class='badge'>{esc(badge)}</span>",
-                                   extra_class="boss", attrs=f" data-diff='{esc(diff)}'")
+        n_pulls = len(pulls)
+        tab_buttons += _tab_button(tab_id, f"{esc(name)}<span class='sub'>{esc(diff)} &middot; {n_pulls} pull{'s' if n_pulls != 1 else ''}</span> <span class='badge'>{esc(badge)}</span>",
+                                   extra_class="boss", attrs=f" data-diff='{esc(diff)}' data-name='{esc(name)}'")
         tab_panels += _tab_panel(tab_id, f"<h1>{esc(name)} <span class='diff'>{esc(diff)}</span></h1>"
-                                         + boss_tab(pulls, name, diff, avoidable_cfg, tab_id, compress))
+                                         + boss_tab(pulls, name, diff, avoidable_cfg, tab_id, compress), busy=True)
     # difficulty segment: one row of boss tabs at a time when several difficulties are present
     diffbar = ""
     if len(diffs_present) > 1:
@@ -99,7 +105,7 @@ def build_html(bosses: dict, args) -> str:
     types_present.sort(key=lambda t: 0 if t == "main" else 1)
     if len(types_present) > 1:
         for t in types_present:
-            tab_buttons += _tab_button(f"tabRaid_{t}", f"Raid <span class='diff'>{t}</span>", "players" if t == "main" else "")
+            tab_buttons += _tab_button(f"tabRaid_{t}", f"Raid<span class='sub'>{t}</span>", "players" if t == "main" else "")
             tab_panels += _tab_panel(f"tabRaid_{t}", raid_tab(bosses, t))
     else:
         tab_buttons += _tab_button("tabRaid", "Raid", "players")
@@ -130,14 +136,15 @@ def build_html(bosses: dict, args) -> str:
                 f"<option value='main'>Main only ({n_main})</option><option value='open'>Open only ({n_open})</option></select></label>") if n_open else \
                "<select id='gType' hidden aria-hidden='true'><option value=''></option></select>"
     toolbar = f"""
-<div class='toolbar' role='region' aria-label='Global filters'>
+<div class='toolbar' role='region' aria-label='Global filters'><div class='wrap'>
+<details class='filters' open><summary>Filters <span class='count' aria-live='polite'></span></summary><div class='controls'>
   {type_sel}
   <label>Raid night <select id='gNight'><option value=''>All nights ({len(nights_sorted)})</option>{night_opts}</select></label>
   <label>Player <select id='gPlayer'><option value=''>All players ({len(player_counts)})</option>{player_opts}</select></label>
   <button type='button' id='gClear' class='chip'>clear filters</button>
-  <label class='filter' style='margin:0'><input type='checkbox' id='gWide'> wide layout</label>
-  <span class='muted chip-hint'>filters apply to every boss tab and the Players tab &middot; click pulls inside a tab to narrow further</span>
-</div>
+  <label class='filter'><input type='checkbox' id='gWide'> wide layout</label>
+</div></details>
+</div></div>
 <script type='application/json' id='tab_names'>{json_for_script(tab_names)}</script>"""
     mplus_html = mplus_tab()
     if mplus_html:
@@ -145,7 +152,8 @@ def build_html(bosses: dict, args) -> str:
         tab_panels += _tab_panel("tabMplus", mplus_html)
 
     guild = os.getenv("GUILD_NAME", "Guild")
-    generated = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now = datetime.now()
+    generated, generated_iso = now.strftime("%Y-%m-%d %H:%M"), now.strftime("%Y-%m-%dT%H:%M")
     filters = [f"{args.start} to {args.end}", "/".join(d.capitalize() for d in args.difficulty)]
     if args.zone: filters.append(f"zone: {args.zone}")
     if args.boss: filters.append(f"boss: {args.boss}")
@@ -155,12 +163,16 @@ def build_html(bosses: dict, args) -> str:
     if getattr(args, "reports", None): filters.append(f"{len(args.reports)} listed report{'s' if len(args.reports) != 1 else ''}")
     zones = sorted({p["zone"] for pulls in bosses.values() for p in pulls if p.get("zone")})
 
-    return f"""<!DOCTYPE html>
+    diff_label = " / ".join(d.capitalize() for d in args.difficulty)
+    n_reports = len({p["report_code"] for p in pulls_all})
+    m = re.search(r"plotly-([\d.]+?)(?:\.min)?\.js", PLOTLY_CDN)
+    plotly_version = m.group(1) if m else "unknown"
+    page = f"""<!DOCTYPE html>
 <html lang='en'>
 <head>
 <meta charset='utf-8'>
 <meta name='viewport' content='width=device-width, initial-scale=1'>
-<title>{esc(guild)} - Raid dashboard {esc(args.start)} to {esc(args.end)}</title>
+<title>{esc(guild)} raid dashboard, {esc(', '.join(zones)) if zones else 'raids'}, {esc(args.start)} to {esc(args.end)}</title>
 <script src='{PLOTLY_CDN}'></script>
 <style>
 {static_file("tokens.css")}
@@ -169,21 +181,32 @@ def build_html(bosses: dict, args) -> str:
 </head>
 <body>
 <a class='skip' href='#main'>Skip to content</a>
-<header>
-  <div class='title'>{esc(guild)} - Raid dashboard{(' - ' + esc(', '.join(zones))) if zones else ''}</div>
-  <div class='sub'>{esc(' · '.join(filters))} &middot; generated {esc(generated)}</div>
-</header>
+<header class='page'><div class='wrap'>
+  <div>
+    <h1>{esc(guild)} raid dashboard{(" <span class='tier'>" + esc(', '.join(zones)) + '</span>') if zones else ''}</h1>
+    <p class='meta'>{esc(' · '.join(filters))} &middot; generated {esc(generated)}</p>
+  </div>
+  <p class='meta'>{len(ordered)} boss tab{'s' if len(ordered) != 1 else ''} &middot; {len(nights_sorted)} raid night{'s' if len(nights_sorted) != 1 else ''}</p>
+</div></header>
 {toolbar}
 <div id='jsError' class='note' role='alert' hidden></div>
+<nav class='wrap tabnav{" has-diffbar" if diffbar else ""}' aria-label='Dashboard sections'>
 {diffbar}
 <label class='tabselect-wrap'><span class='sr-only'>Go to tab</span><select id='tabSelect' aria-label='Go to tab'></select></label>
-<nav class='tabs' role='tablist' aria-label='Dashboard tabs'>{tab_buttons}</nav>
-<main id='main'>
+<div class='tabs' role='tablist' aria-label='Dashboard tabs' inert>{tab_buttons}</div>
+</nav>
+<main id='main' class='wrap' tabindex='-1'>
+<div id='oldBrowser' class='note' hidden>This dashboard needs a browser from 2023 or newer (Chrome 80+, Firefox 113+, Safari 16.4+) to decompress its data. Please update your browser.</div>
 {tab_panels}
 </main>
-<div id='oldBrowser' class='note' hidden>This dashboard needs a browser from 2023 or newer (Chrome 80+, Firefox 113+, Safari 16.4+) to decompress its data. Please update your browser.</div>
+<footer class='page'><div class='wrap'>
+  <p>Built from Warcraft Logs reports for {esc(guild)}, {esc(args.start)} to {esc(args.end)}, {esc(diff_label)}.</p>
+  <p>Generated <time datetime='{generated_iso}'>{esc(generated)}</time> &middot; {n_reports} report{'s' if n_reports != 1 else ''} &middot; {SIZE_PLACEHOLDER} KB &middot; Plotly {esc(plotly_version)} &middot; Percentages are boss HP left; lower is better.</p>
+  <p>Boss tabs are rendered in the browser from a compressed payload on first open. Use the pickers at the top to look at one night or one player.</p>
+</div></footer>
 <script>
 {static_file("dash.js")}
 </script>
 </body>
 </html>"""
+    return page.replace(SIZE_PLACEHOLDER, str(len(page.encode("utf-8")) // 1024))
