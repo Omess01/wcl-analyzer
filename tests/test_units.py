@@ -154,3 +154,105 @@ def test_hp_band_thresholds():
     assert hp_band(7) == "near" and hp_band(9.9) == "near"
     assert hp_band(10) == "mid" and hp_band(25) == "mid" and hp_band(39.9) == "mid"
     assert hp_band(40) == "far" and hp_band(60) == "far" and hp_band(100) == "far"
+
+
+# --- who pulled (pull_initiator) -------------------------------------------------------------
+
+def _pull_setup():
+    """Three players, one hunter pet, two enemies (42 boss, 54 add); WCL's Environment actor is -1."""
+    actors = {1: {"name": "Voltarian", "class": "Hunter", "server": "TarrenMill"},
+              2: {"name": "Totemdave", "class": "Shaman", "server": "TarrenMill"},
+              3: {"name": "Morse", "class": "Priest", "server": "Hellfire"},
+              4: {"name": "Bystander", "class": "Mage", "server": "TarrenMill"}}
+    lab = Labeller()
+    lab.learn(actors)
+    parts = {"Voltarian": "Hunter", "Totemdave": "Shaman", "Morse": "Priest"}   # Bystander is not in the pull
+    names = {1: "Melee", 100: "Kill Command", 101: "Flame Shock", 102: "Ascendance", 103: "Barbed Shot",
+             104: "Power Word: Shield", 105: "Taunt"}
+    fight = {"startTime": 10_000, "endTime": 200_000}
+    return actors, lab, parts, names, fight
+
+
+def _ev(kind, src, ability, ts, tgt=42):
+    return {"type": kind, "sourceID": src, "targetID": tgt, "abilityGameID": ability, "timestamp": ts}
+
+
+def _who(damage, casts, hostile=frozenset({42, 54}), pets=None):
+    from collect_data import pull_initiator
+    actors, lab, parts, names, fight = _pull_setup()
+    return pull_initiator(damage, casts, fight, actors, lab, parts, set(hostile), {50: 1} if pets is None else pets, names)
+
+
+def test_pull_initiator_pet_damage_is_credited_to_the_owner():
+    out = _who([_ev("damage", 50, 100, 10_004), _ev("damage", 2, 101, 10_053)], [])
+    assert out == {"player": "Voltarian", "class": "Hunter", "ability": "Kill Command", "offset_ms": 4,
+                   "kind": "damage", "via_pet": True}
+    # a pet nobody owns (or an unknown source) is skipped, the next action counts
+    out = _who([_ev("damage", 50, 100, 10_004), _ev("damage", 99, 1, 10_010), _ev("damage", 2, 101, 10_053)], [], pets={})
+    assert out["player"] == "Totemdave" and out["via_pet"] is False and out["offset_ms"] == 53
+
+
+def test_pull_initiator_begincast_and_non_damaging_casts_do_not_count():
+    # begincast on the boss is not an action yet; a self-buff logged "on the boss" (Ascendance) does not attack it
+    casts = [_ev("begincast", 2, 101, 10_000), _ev("cast", 2, 102, 10_039)]
+    damage = [_ev("damage", 3, 1, 10_300)]
+    assert _who(damage, casts)["player"] == "Morse"
+    # ... but a cast whose ability also damages an enemy in the window is the pull (projectile still in flight)
+    casts.append(_ev("cast", 1, 103, 10_054))
+    damage.append(_ev("damage", 1, 103, 10_485))
+    out = _who(damage, casts)
+    assert out == {"player": "Voltarian", "class": "Hunter", "ability": "Barbed Shot", "offset_ms": 54,
+                   "kind": "cast", "via_pet": False}
+
+
+def test_pull_initiator_taunt_pull_counts_without_damage():
+    # a tank's taunt (105 = Taunt) engages the boss although it never shows up as damage
+    casts = [_ev("cast", 3, 105, 10_010), _ev("cast", 2, 102, 10_005)]     # Ascendance "on the boss" at 5 ms still ignored
+    damage = [_ev("damage", 1, 103, 10_300)]
+    out = _who(damage, casts)
+    assert out == {"player": "Morse", "class": "Priest", "ability": "Taunt", "offset_ms": 10, "kind": "cast", "via_pet": False}
+    # ... but only when it targets an enemy
+    assert _who(damage, [_ev("cast", 3, 105, 10_010, tgt=-1)])["player"] == "Voltarian"
+
+
+def test_pull_initiator_ignores_casts_on_friendly_or_environment_targets():
+    # Flame Shock is damaging, but Morse's earlier cast targets a player (2) and Totemdave's an Environment (-1) target
+    casts = [_ev("cast", 3, 101, 10_000, tgt=2), _ev("cast", 2, 101, 10_010, tgt=-1), _ev("cast", 3, 104, 10_020, tgt=3)]
+    damage = [_ev("damage", 2, 101, 10_050)]
+    out = _who(damage, casts)
+    assert out["player"] == "Totemdave" and out["kind"] == "damage" and out["offset_ms"] == 50
+    # damage on a non-enemy (friendly NPC / player) never counts
+    assert _who([_ev("damage", 3, 1, 10_001, tgt=77)], []) is None
+
+
+def test_pull_initiator_window_edges():
+    from collect_data import PULL_TOLERANCE_MS, PULL_WINDOW_MS
+    start = 10_000
+    early = _ev("damage", 3, 1, start - PULL_TOLERANCE_MS - 1)      # too early: not part of this pull
+    edge = _ev("damage", 2, 101, start - PULL_TOLERANCE_MS)          # inclusive edge
+    late = _ev("damage", 1, 103, start + PULL_WINDOW_MS + 1)         # after the window
+    assert _who([early, late], []) is None
+    out = _who([early, edge, late], [])
+    assert out["player"] == "Totemdave" and out["offset_ms"] == -PULL_TOLERANCE_MS
+    out = _who([late, _ev("damage", 1, 103, start + PULL_WINDOW_MS)], [])
+    assert out["player"] == "Voltarian" and out["offset_ms"] == PULL_WINDOW_MS
+
+
+def test_pull_initiator_ordering_and_ties():
+    # earliest timestamp wins regardless of input order
+    out = _who([_ev("damage", 3, 1, 10_300), _ev("damage", 2, 101, 10_100)], [])
+    assert out["player"] == "Totemdave"
+    # same millisecond: damage beats a (damaging) cast, then log order
+    out = _who([_ev("damage", 3, 1, 10_100)], [_ev("cast", 2, 1, 10_100)])
+    assert out["player"] == "Morse" and out["kind"] == "damage"
+    out = _who([_ev("damage", 1, 103, 10_100), _ev("damage", 3, 1, 10_100)], [])
+    assert out["player"] == "Voltarian"
+    # a non-participant (bench / other group) is skipped, unknown ability ids get a placeholder name
+    out = _who([_ev("damage", 4, 1, 10_000), _ev("damage", 3, 999, 10_001)], [])
+    assert out["player"] == "Morse" and out["ability"] == "Ability 999" and out["class"] == "Priest"
+
+
+def test_pull_initiator_empty_inputs():
+    assert _who([], []) is None
+    assert _who(None, None) is None
+    assert _who([_ev("damage", 2, 101, 10_050)], [], hostile=frozenset()) is None

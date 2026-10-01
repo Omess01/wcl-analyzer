@@ -39,11 +39,14 @@ def pull_grid(pulls: list[dict], tab_id: str) -> str:
                       if (not p["kill"] and fp is not None and abs(fp - p["boss_percentage"]) > 1) else "")
         phase = f"<div class='pb-phase' title='phase the pull ended in'>{esc(p['phase'])}</div>" if p.get("phase") else ""
         deaths = len(p["deaths"])
+        pb = p.get("pulled_by") or {}
+        puller = f" - pulled by {esc(pb['player'])}" if pb.get("player") else ""
         aria = (f"Pull {idx}, {label}{'' if p['kill'] else ' boss HP left'}, {esc(p['night'])} {esc(p['pull_time'])}, "
-                f"{fmt_duration(p['duration_seconds'])}, {deaths} deaths" + (f", ended in {esc(p['phase'])}" if p.get("phase") else ""))
+                f"{fmt_duration(p['duration_seconds'])}, {deaths} deaths" + (f", ended in {esc(p['phase'])}" if p.get("phase") else "")
+                + (f", pulled by {esc(pb['player'])}" if pb.get("player") else ""))
         boxes += (
             f"<button type='button' class='pull-box {cls}' data-idx='{idx}' data-night='{esc(p['night'])}' "
-            f"aria-pressed='false' aria-label='{aria}. Click to inspect' title='Pull #{idx} - {esc(p['report_title'])} - fight {p['fight_id']} - click to inspect'>"
+            f"aria-pressed='false' aria-label='{aria}. Click to inspect' title='Pull #{idx} - {esc(p['report_title'])} - fight {p['fight_id']}{puller} - click to inspect'>"
             f"<div class='pb-pct'>{label}</div>"
             f"<div class='pb-meta'>#{idx} &middot; {esc(p['night'][4:])} {esc(p['pull_time'])}</div>"
             f"<div class='pb-meta pb-more'>{fmt_duration(p['duration_seconds'])} &middot; {deaths} <span aria-hidden='true'>&#8224;</span></div>"
@@ -94,6 +97,13 @@ def _phase_counts(times: list[float], timeline: list[list]) -> list[int] | None:
                 idx = i
         counts[idx] += 1
     return counts
+
+
+def _puller_payload(pb: dict | None) -> list | None:
+    """pulled_by -> [label, ability, offset_ms, "d"|"c"] (the class is in the pull's parts), None when unknown."""
+    if not pb or not pb.get("player"):
+        return None
+    return [pb["player"], pb.get("ability") or "", int(pb.get("offset_ms") or 0), "c" if pb.get("kind") == "cast" else "d"]
 
 
 def pull_payload(pulls: list[dict], boss_name: str, difficulty: str, avoidable_cfg: dict, compress: bool = True) -> tuple[str, str]:
@@ -148,6 +158,7 @@ def pull_payload(pulls: list[dict], boss_name: str, difficulty: str, avoidable_c
             "ir": p.get("interrupts") or {}, "ds": p.get("dispels") or {},
             "use": {name: [u.get(k, 0) for k in usecats] for name, u in (p.get("consumable_use") or {}).items()},
             "cons": cons, "hx": bool(p.get("has_extras")),
+            "pb": _puller_payload(p.get("pulled_by")),
         })
     nights_here = {p["night"] for p in pulls}
     busy = {n: [[int(a), int(e)] for a, e, _ in NIGHT_FIGHTS.get(n, [])] for n in nights_here}

@@ -50,7 +50,9 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
   // WCL class ids are CamelCase ('DemonHunter'); the spec line shows them as words ('Demon Hunter')
   const clsLabel = c => String(c).replace(/([a-z])([A-Z])/g, '$1 $2');
   const escH = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/'/g, '&#39;').replace(/"/g, '&quot;');
-  const th = h => { const cls = h[1] === 'num' ? " class='right'" : ''; return h[1] === 'none' ? `<th scope='col' data-type='none'${cls}>${escH(h[0])}</th>` : `<th scope='col' data-type='${h[1]}'${cls}><button type='button' aria-label='Sort by ${escH(h[0])}'>${escH(h[0])}</button></th>`; };
+  // heads are [label, kind] or [label, kind, full]: `full` (e.g. the whole boss title behind a short head) becomes the
+  // header's title tooltip and the sort button's aria-label; without it the label is used as before
+  const th = h => { const cls = h[1] === 'num' ? " class='right'" : '', full = h[2] || h[0], tip = h[2] ? ` title='${escH(h[2])}'` : ''; return h[1] === 'none' ? `<th scope='col' data-type='none'${cls}${tip}>${escH(h[0])}</th>` : `<th scope='col' data-type='${h[1]}'${cls}${tip}><button type='button' aria-label='Sort by ${escH(full)}'>${escH(h[0])}</button></th>`; };
   // rows after `limit` are hidden (class lowpart) behind a "Show all N" button at the end of the scroller
   const lowRow = r => { const m = /^<tr([^>]*?)\bclass=(?:'([^']*)'|"([^"]*)"|([^\s>'"]+))/.exec(r); return m ? `<tr${m[1]}class='${m[2] ?? m[3] ?? m[4]} lowpart'` + r.slice(m[0].length) : r.startsWith('<tr') ? "<tr class='lowpart'" + r.slice(3) : r; };
   const tbl = (heads, rows, extra, caption, limit) => {
@@ -61,6 +63,84 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
   const bar = (share, heal) => `<span class='bar${heal ? ' heal' : ''}' aria-hidden='true'><i style='width:${Math.max(0, Math.min(100, share)).toFixed(1)}%'></i></span>`;
   // shared empty state (mirrors empty_state() in dash/common.py)
   const emptyHtml = (what, why, action) => `<div class='empty' role='status'><strong>No ${escH(what)}</strong><span>${escH(why)}</span>${action ? `<span class='action'>${escH(action)}</span>` : ''}</div>`;
+  // Who pulled: pulls carry pb = [label, ability, offset_ms, 'd'|'c'] or null (unknown). Share is % of all given pulls
+  // (one decimal), so the player rows plus the unknown count add up to the pull count. Order: pulls desc, then name.
+  const byPullsThenName = (a, b) => b.pulls - a.pulls || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  const share1 = (a, b) => b ? Math.round(a / b * 1000) / 10 : 0;
+  function pullerRows(pulls) {
+    const per = {}; let unknown = 0;
+    (pulls || []).forEach(p => {
+      const pb = p.pb; if (!pb || !pb[0]) { unknown++; return; }
+      const e = per[pb[0]] || (per[pb[0]] = { name: pb[0], cl: (p.parts || {})[pb[0]] || '', pulls: 0, ab: {} });
+      e.pulls++; if (!e.cl && p.parts && p.parts[pb[0]]) e.cl = p.parts[pb[0]];
+      if (pb[1]) e.ab[pb[1]] = (e.ab[pb[1]] || 0) + 1;
+    });
+    const total = (pulls || []).length;
+    const rows = Object.values(per).map(e => {
+      const ab = Object.entries(e.ab).sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))[0];
+      return { name: e.name, cl: e.cl, pulls: e.pulls, share: share1(e.pulls, total), opener: ab ? ab[0] : '', openerCount: ab ? ab[1] : 0 };
+    }).sort(byPullsThenName);
+    return { rows, unknown, unknownShare: share1(unknown, total), total };
+  }
+  // players x boss tabs: lists = [{key, label, pulls}] in tab order; columns = the lists with at least one pull,
+  // rows = every participant of the counted pulls (union of p.parts keys) with a count per column + total (0 for players
+  // who never pulled), class = the one seen in most of their pulls (tie -> first seen); unknown = pulls without data;
+  // participants / pullers = row count / players with at least one pull (caption)
+  function pullerMatrix(lists) {
+    const cols = [], per = {}, unknown = { counts: {}, total: 0 }; let total = 0;
+    const row = n => per[n] || (per[n] = { name: n, cls: {}, counts: {}, pulls: 0 });
+    (lists || []).forEach(l => {
+      const ps = l.pulls || []; if (!ps.length) return;
+      cols.push({ key: l.key, label: l.label }); total += ps.length;
+      ps.forEach(p => {
+        Object.entries(p.parts || {}).forEach(([n, c]) => { const e = row(n); if (c) e.cls[c] = (e.cls[c] || 0) + 1; });
+        const pb = p.pb; if (!pb || !pb[0]) { unknown.counts[l.key] = (unknown.counts[l.key] || 0) + 1; unknown.total++; return; }
+        const e = row(pb[0]); e.counts[l.key] = (e.counts[l.key] || 0) + 1; e.pulls++;
+      });
+    });
+    // insertion order of e.cls is first-seen order, so the stable reduce keeps the first class on a tie
+    const topCls = o => Object.entries(o).reduce((b, x) => x[1] > b[1] ? x : b, ['', 0])[0];
+    const rows = Object.values(per).sort(byPullsThenName).map(e => ({ name: e.name, cl: topCls(e.cls), counts: e.counts, total: e.pulls }));
+    return { cols, rows, unknown, total, participants: rows.length, pullers: rows.filter(e => e.total > 0).length };
+  }
+  // compact boss column head: "Nek'zali the Soulcoiler (Heroic)" -> "Nek'zali H". words = 1: first word of the name
+  // (leading "The " dropped, apostrophes kept, capped at 10 characters); words = 2 adds the next word that is not
+  // the/of/and/a, abbreviated to "X." when the head would get long (full = true keeps it whole, capped at 10).
+  // Difficulty suffix N / H / M (LFR -> L).
+  const SHORT_SKIP = new Set(['the', 'of', 'and', 'a']);
+  const capWord = (w, n) => w.length > n ? w.slice(0, n - 1) + '.' : w;
+  function shortBossHead(title, words, full) {
+    const m = /^(.*?)\s*\(([^()]*)\)\s*$/.exec(String(title || ''));
+    const name = (m ? m[1] : String(title || '')).trim().replace(/^the\s+/i, ''), diff = m ? m[2].trim() : '';
+    const suffix = !diff ? '' : /^lfr$|looking for raid/i.test(diff) ? 'L' : diff[0].toUpperCase();
+    const ws = name.split(/\s+/).filter(Boolean);
+    let head = capWord(ws[0] || name, 10);
+    if (words === 2) {
+      const next = ws.slice(1).find(w => !SHORT_SKIP.has(w.toLowerCase()));
+      if (next) head += ' ' + (!full && head.length + 1 + next.length > 14 ? next[0] + '.' : capWord(next, 10));
+    }
+    return suffix ? `${head} ${suffix}` : head;
+  }
+  // short heads for a list of titles, collision-aware (deterministic, order-independent): a head shared by several
+  // titles is replaced for those titles by the next longer form - two words, two unabbreviated words, the full title
+  function shortBossHeads(titles) {
+    const ts = titles || [], count = a => a.reduce((o, h) => (o[h] = (o[h] || 0) + 1, o), {});
+    const forms = [t => shortBossHead(t, 2), t => shortBossHead(t, 2, true), t => String(t)];
+    let heads = ts.map(t => shortBossHead(t, 1));
+    forms.forEach(f => { const c = count(heads); heads = heads.map((h, i) => c[h] > 1 ? f(ts[i]) : h); });
+    return heads;
+  }
+  // matrix headers: Player, Total (visible without scrolling), then the boss columns in tab order with short heads
+  // (full tab title as third element -> th title + sort-button aria-label)
+  const pullerMatrixHeads = cols => { const cs = cols || [], sh = shortBossHeads(cs.map(c => c.label)); return [['Player', 'str'], ['Total', 'num']].concat(cs.map((c, i) => [sh[i], 'num', c.label])); };
+  // every pull of every boss tab: lists = [{key, label, pulls}] in tab order -> [{tab, label, p}], chronological by the
+  // pull's absolute start (payload key a, epoch ms); ties by tab order, then pull number p.i
+  function allPullRows(lists) {
+    const out = [];
+    (lists || []).forEach((l, ti) => (l.pulls || []).forEach(p => out.push({ tab: l.key, label: l.label, p, ti })));
+    out.sort((x, y) => ((x.p.a || 0) - (y.p.a || 0)) || (x.ti - y.ti) || ((x.p.i || 0) - (y.p.i || 0)));
+    return out.map(r => ({ tab: r.tab, label: r.label, p: r.p }));
+  }
   // --- end table helpers ---
   const kpisHtml = (items, extra) => `<dl class='kpis${extra ? ' ' + extra : ''}'>${items.map(([l, v, c]) => `<div class='kpi${c ? ' ' + c : ''}'><dt>${escH(l)}</dt><dd>${v}</dd></div>`).join('')}</dl>`;
   const resLabel = p => p.k ? 'KILL' : p.p.toFixed(1) + '%';
@@ -195,9 +275,52 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
       g.addEventListener('keydown', evt => { if (evt.key === 'Enter' || evt.key === ' ') { evt.preventDefault(); onPick(S[j].i, additive(evt)); } });
     });
   }
+  // "Pulled by" cell: player (class colour) + opener ability and its offset from the pull start; a dash when unknown
+  const fmtOffset = ms => (ms / 1000).toFixed(1) + ' s';
+  const pulledByCell = p => p.pb && p.pb[0]
+    ? `<td data-sort='${escH(p.pb[0])}'>${playerCell(p.pb[0], (p.parts || {})[p.pb[0]] || '')}<br><span class='spec'>${escH([p.pb[1], fmtOffset(p.pb[2] || 0)].filter(Boolean).join(', '))}</span></td>`
+    : `<td data-sort=''><span class='muted'>&ndash;</span></td>`;
+  // shared pull-row cells: Started | Result | Duration | Deaths | Pulled by | Ended in (pull table and Players-tab "All pulls")
+  const PULL_CELL_HEADS = [['Started', 'str'], ['Result', 'num'], ['Duration', 'num'], ['Deaths', 'num'], ['Pulled by', 'str'], ['Ended in', 'none']];
+  const pullCells = p => `<td>${escH(p.t)}</td><td class='right' data-sort='${p.k ? 0 : p.p}'>${resLabel(p)}</td><td class='right' data-sort='${p.d}'>${fmtD(p.d)}</td><td class='right'>${p.deaths.length}</td>${pulledByCell(p)}<td><span class='spec'>${escH(p.ph || '-')}</span></td>`;
   function pullsTableHtml(S, tab) {
-    return `<details class='table-view'><summary>Show the ${S.length} pull${S.length === 1 ? '' : 's'} as a table</summary>` + tbl([['Pull', 'num'], ['Night', 'str'], ['Started', 'str'], ['Result', 'num'], ['Duration', 'num'], ['Deaths', 'num'], ['Ended in', 'none']],
-      S.map(p => `<tr><td class='right'>${p.i}</td><td>${escH(p.n)}</td><td>${escH(p.t)}</td><td class='right' data-sort='${p.k ? 0 : p.p}'>${resLabel(p)}</td><td class='right' data-sort='${p.d}'>${fmtD(p.d)}</td><td class='right'>${p.deaths.length}</td><td><span class='spec'>${escH(p.ph || '-')}</span></td></tr>`), '', `Every selected pull, the table behind the chart`) + `</details>`;
+    return `<details class='table-view'><summary>Show the ${S.length} pull${S.length === 1 ? '' : 's'} as a table</summary>` + tbl([['Pull', 'num'], ['Night', 'str']].concat(PULL_CELL_HEADS),
+      S.map(p => `<tr><td class='right'>${p.i}</td><td>${escH(p.n)}</td>${pullCells(p)}</tr>`), '', `Every selected pull, the table behind the chart`) + `</details>`;
+  }
+  // "Who pulled" table (boss tab Summary): the selected pulls S, already narrowed by the global filters and the pull selection
+  function whoPulledHtml(S) {
+    const r = pullerRows(S);
+    if (!r.rows.length) return emptyHtml('puller data', r.total ? 'no friendly action on an enemy was found at the start of these pulls' : 'no pulls in this selection', '');
+    const rows = r.rows.map(e => `<tr data-player='${escH(e.name)}'><td>${playerCell(e.name, e.cl)}</td><td>${e.pulls}</td><td data-sort='${e.share}'>${e.share.toFixed(1)}%</td><td>${e.opener ? `${escH(e.opener)} <span class='muted'>(${e.openerCount})</span>` : '-'}</td></tr>`);
+    if (r.unknown) rows.push(`<tr class='unknown'><td>Unknown</td><td>${r.unknown}</td><td data-sort='${r.unknownShare}'>${r.unknownShare.toFixed(1)}%</td><td>-</td></tr>`);
+    return tbl([['Player', 'str'], ['Pulls', 'num'], ['Share', 'num'], ['Most used opener', 'str']], rows, '',
+      `${r.rows.length} player${r.rows.length === 1 ? '' : 's'} started ${r.total - r.unknown} of the ${r.total} selected pull${r.total === 1 ? '' : 's'}, most pulls first`, 15);
+  }
+  // "Who pulls first" matrix (Players tab): Player, Total, then one column per boss tab in tab order, filtered by `keep`;
+  // class pull-matrix keeps the Player column sticky while the scroller scrolls sideways
+  // boss tabs in tab order with their pulls filtered by `keep` (input of pullerMatrix / allPullRows)
+  const bossPullLists = keep => bossTabs.map(tab => { const st = loadTab(tab); return { key: tab, label: TAB_NAMES[tab], pulls: st ? st.data.pulls.filter(keep) : [] }; });
+  function whoPullsFirstHtml(keep) {
+    const lists = bossPullLists(keep);
+    const m = pullerMatrix(lists);
+    let html = `<h2 id='sec_tabPlayers_pull'>Who pulls first</h2>`;
+    if (!m.pullers) return html + emptyHtml('puller data', m.total ? 'no friendly action on an enemy was found at the start of these pulls' : 'no boss pulls in this selection', '');
+    const cell = n => `<td data-sort='${n || 0}'>${n ? n : "<span class='muted'>-</span>"}</td>`;
+    const rows = m.rows.map(e => `<tr data-player='${escH(e.name)}'><td>${playerCell(e.name, e.cl)}</td>${cell(e.total)}${m.cols.map(c => cell(e.counts[c.key])).join('')}</tr>`);
+    if (m.unknown.total) rows.push(`<tr class='unknown'><td>Unknown</td><td>${m.unknown.total}</td>${m.cols.map(c => cell(m.unknown.counts[c.key])).join('')}</tr>`);
+    html += tbl(pullerMatrixHeads(m.cols), rows, 'pull-matrix',
+      `${m.pullers} of ${m.participants} player${m.participants === 1 ? '' : 's'} started ${m.total - m.unknown.total} of ${m.total} boss pull${m.total === 1 ? '' : 's'}, most pulls first`, 15);
+    return html + `<p class='section-note'>Columns: boss, N / H / M = Normal / Heroic / Mythic (hover a column head for the full name). The puller is whoever (pet counted for its owner) hit or cast on an enemy first at the start of the pull. A body pull is credited to the first player who then hit the boss.</p>`;
+  }
+  // "All pulls" (Players tab, under the matrix): every pull of every boss tab and difficulty, one row each, chronological
+  function allPullsHtml(keep) {
+    const rows = allPullRows(bossPullLists(keep));
+    let html = `<h2 id='sec_tabPlayers_allpulls'>All pulls</h2>`;
+    if (!rows.length) return html + emptyHtml('pulls', 'no boss pulls in this selection', 'Esc clears the filters');
+    const bosses = new Set(rows.map(r => r.tab)).size;
+    return html + tbl([['Boss', 'str'], ['Night', 'str'], ['Pull', 'num']].concat(PULL_CELL_HEADS),
+      rows.map(({ tab, label, p }) => `<tr><td data-sort='${escH(label)}'><button type='button' class='gotab linklike' data-tab='${tab}'>${escH(label)}</button></td><td data-sort='${p.a || 0}'>${escH(p.n)}</td><td class='right'>${p.i}</td>${pullCells(p)}</tr>`),
+      '', `${rows.length} pull${rows.length === 1 ? '' : 's'} across ${bosses} boss${bosses === 1 ? '' : 'es'}, oldest first`, 25);
   }
   let chartSeq = 0;
   const charts = [];
@@ -333,6 +456,7 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
     }));
   }
   const loadTab = tab => PD[tab] || null;
+  playersDirty = true;   // the Players tab's "Who pulls first" matrix needs the inflated payloads, also without a filter
 
   // ---------------- sortable tables + toggles ----------------
   // data-limit='N': the first N rows that are not hidden by "Hide tanks" stay visible, the rest get lowpart
@@ -498,7 +622,8 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
     const items = topN(byAb, 10), top = items.length ? items[0][1] : 1;
     const taken = items.length ? `<div class='scroller'><table class='summary'><tbody>${items.map(([a, v]) => `<tr><td>${escH(a)}</td><td>${bar(v / top * 100)}</td><td>${fmtN(v)}</td><td class='muted'>${fmtN(v / (secs || 1))} DTPS</td></tr>`).join('')}</tbody></table></div>` : emptyHtml('damage taken', 'WCL returned no entries for these pulls', '');
     return `<h2 id='sec_${tab}_sum'>Summary</h2><div class='grid3'><div><h3>Damage done by source</h3>${list('dd', 'DPS')}</div><div><h3>Healing done by source</h3>${list('hd', 'HPS')}</div><div><h3>Damage taken by ability</h3>${taken}</div></div>
-      <p class='section-note'>Totals across the selected pulls. DPS/HPS = total &divide; time in the pulls that player was in. Parse % (below) is only available for kills - WCL doesn't rank wipes.</p>`;
+      <p class='section-note'>Totals across the selected pulls. DPS/HPS = total &divide; time in the pulls that player was in. Parse % (below) is only available for kills - WCL doesn't rank wipes.</p>
+      <h3>Who pulled</h3>${whoPulledHtml(S)}`;
   }
   function secOutput(S, key, rate, metric, kind, tab) {
     const all = Object.entries(aggOutput(S, key, metric));
@@ -953,7 +1078,9 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
   function renderPlayersTab() {
     const stat = document.getElementById('static_tabPlayers'), panel = document.getElementById('detail_tabPlayers');
     playersDirty = false;
-    if (!G.night && !G.player && !G.ntype) { panel.classList.remove('open', 'filtered'); panel.innerHTML = ''; stat.classList.remove('hidden'); return; }
+    // unfiltered: the static (Python) view stays and the panel carries only the "Who pulls first" matrix over every pull
+    if (!G.night && !G.player && !G.ntype) { stat.classList.remove('hidden'); panel.classList.remove('filtered'); panel.classList.add('open');
+      panel.innerHTML = whoPullsFirstHtml(() => true) + allPullsHtml(() => true); wireSort(panel); wireToggles(panel); return; }
     stat.classList.add('hidden');
     const nightOk = p => G.night ? p.n === G.night : typeOk(p);
     let html = `<button type='button' class='close'>&#10005; show everything</button>`;
@@ -972,6 +1099,8 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
       html += rows.length ? tbl([['Boss', 'str'], ['Pulls', 'num'], ['First death', 'num'], ['Started the wipe', 'num'], ['Deaths', 'num'], ['Avoidable hits / pull', 'num'], ['Dmg taken / pull', 'num'], ['DPS', 'num'], ['HPS', 'num']], rows, '', `${rows.length} boss${rows.length === 1 ? '' : 'es'} with pulls in this selection`)
                           : emptyHtml('pulls', `${G.player} has no pulls in this selection`, 'Esc clears the filters');
       html += `<p class='section-note'>Click a boss name to open that tab with the same filters.</p>`;
+      html += whoPullsFirstHtml(p => nightOk(p) && G.player in p.parts);
+      html += allPullsHtml(p => nightOk(p) && G.player in p.parts);
     } else {
       html += `<h2 class='panel-title'>${escH(G.night || (G.ntype === 'open' ? 'Open nights' : 'Main nights'))} <span class='sub'>all bosses</span></h2>`;
       const o = {}; let anyA = false;
@@ -983,6 +1112,8 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
       html += tbl([['Player', 'str'], ['Pulls', 'num'], ['Bosses', 'num'], ['First death', 'num'], ['Started the wipe in % of pulls', 'num']].concat(anyA ? [['Avoidable hits / pull', 'num']] : []).concat([['What killed them', 'str']]),
           Object.entries(o).sort((x, y) => (y[1].fd / Math.max(y[1].pulls, 1)) - (x[1].fd / Math.max(x[1].pulls, 1))).map(([name, e]) => { const k = Math.max(e.pulls, 1);
             return `<tr data-player='${escH(name)}'><td>${playerCell(name, e.cl)}</td><td>${e.pulls}</td><td>${e.bosses.size}</td><td>${e.fd}</td><td data-sort='${e.fd / k}'>${pct(e.fd, k)}%</td>${anyA ? `<td data-sort='${e.av / k}'>${(e.av / k).toFixed(1)}</td>` : ''}<td>${topN(e.causes, 2).map(([a, c]) => `${escH(a)} (${c})`).join(', ') || '-'}</td></tr>`; }), '', `${Object.keys(o).length} players, most first deaths per pull first`, 15);
+      html += whoPullsFirstHtml(nightOk);
+      html += allPullsHtml(nightOk);
     }
     panel.innerHTML = html; panel.classList.add('open', 'filtered');
     panel.querySelector('.close').addEventListener('click', clearAll);

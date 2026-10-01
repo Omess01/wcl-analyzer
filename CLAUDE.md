@@ -11,6 +11,36 @@
 
 ---
 
+## 0. Working agreement for Claude Code — delegation policy `[ADDED 2026-09-25]`
+
+The orchestrating Claude Code session **never does the work itself**. It plans, dispatches sub-agents, reads their
+reports, and integrates. This is a standing instruction from the user and overrides the default "do it inline" behaviour.
+
+- **Plan first.** Break the request into tasks with explicit inputs, files, constraints and acceptance criteria before
+  dispatching anything. Non-trivial work gets a written plan (`docs/plans/` or the reply) that the user can correct.
+- **One sub-agent per task.** Every task is its own `Agent` call with a self-contained prompt (context, files, the rules
+  in this document, expected report format). Never bundle unrelated tasks into one agent.
+- **Independent tasks run in parallel.** Dispatch them in the same message so they run concurrently. A task that depends
+  on another waits for that agent's report.
+- **Model routing — pass `model` on every `Agent` call, no exceptions:**
+
+  | Task kind | Model | `model` value |
+  |---|---|---|
+  | Architecture, design decisions, hard bugs / root-cause analysis, code and security reviews | Fable 5.1 | `fable` |
+  | Edits, tests, docs, refactors, fixtures, routine implementation from an existing plan | Opus 5.5 | `opus` |
+
+  When in doubt about difficulty, start with Opus 5.5; escalate to Fable 5.1 if the report shows the agent got stuck.
+- **Read the reports, not only the files.** A sub-agent's final report is the primary evidence. Read it in full, check
+  its claims against the acceptance criteria, and relay what matters to the user. Re-read files to verify a specific
+  claim, never as a substitute for reading the report.
+- **Verification is delegated too.** `pytest`, the quickjs syntax check and headless-Firefox screenshots run inside a
+  sub-agent (Opus 5.5) whose report must include the raw command output. Do not claim success without that output.
+- **What the orchestrator may still do itself:** clarify requirements, write the plan, read reports, do the minimal
+  orienting reads needed to write a good prompt (a single `grep`/`sed -n`, not a review), update memory, and run the
+  `git commit` the user asked for. Everything else is dispatched.
+
+---
+
 ## 1. What this is
 
 A Python tool that reproduces Warcraft Logs' paid **Multiple Report Analysis** for the user's guild
@@ -72,7 +102,7 @@ legacy/merge_pulls.py  superseded early CLI
 python -m venv venv && source venv/bin/activate.fish     # fish shell!
 pip install -r requirements.txt                          # requests, python-dotenv, plotly (+ pytest, quickjs for tests)
 python build_dashboard.py 2026-08-23 2026-09-21          # -> dashboards/dashboard_<start>_to_<end>.html
-python -m pytest -q                                      # 94 tests, offline
+python -m pytest -q                                      # 107 tests, offline
 ```
 
 CLI (`build_dashboard.py`): `--difficulty ...` (default `DIFFICULTIES` in .env, else heroic mythic) · `--zone` · `--boss` · `--player` ·
@@ -120,6 +150,13 @@ from a `ThreadPoolExecutor`; then **casts before the first death**; then the pul
 - `[ADDED]` **Consumable casts**: `events(dataType: Casts, filterExpression: "ability.id in (...)")` per fight from 5 s before the pull,
   ids = report abilities whose names match the cast categories in `consumables.json`; 10 fights per request, key
   `entry:cons:v1:<code>:<fid>:<ids-hash>`. Gives pre-pot + combat / healing / mana potion + Healthstone uses per player.
+- `[ADDED 2026-09-29]` **Who pulled** (`get_pull_events()` + `pull_initiator()`): per fight `events(dataType: DamageDone / Casts, hostilityType: Friendlies)`
+  from `PULL_TOLERANCE_MS` (1 000) before to `PULL_WINDOW_MS` (5 000) after fight start (aliases `pbd_<fid>` / `pbc_<fid>`, limits 1000 / 500),
+  10 fights per request, key `entry:puller:v1:<code>:<fid>`; enemy and pet ids from the cached report-level `PULL_ACTORS_QUERY`
+  (`fights { enemyNPCs, friendlyPets }` + `masterData` Pet actors; per-fight `friendlyPets` wins). Puller = participant (pet → owner, `via_pet`)
+  behind the earliest `damage` on an enemy, or `cast` (never `begincast`) on an enemy whose ability also damages an enemy in the window
+  or is in `PULL_TAUNTS`; same ms → damage before cast, then log order; nothing → `None`. `[DECISION]` the damage/taunt condition because
+  WCL logs self-buffs (Ascendance) with the caster's current target. `WCLError` → warn once, pullers unknown.
 - `[ADDED]` **Labeller**: player identity is (name, realm); label is the bare name unless the name exists on >1 realm in the dataset →
   `Name-Realm`. Tables matched by actor `id`, rankings by `name` + `server.name`, events by `targetID`.
 - `[CHANGED]` **Refresh granularity**: a report with a changed endTime re-fetches report-level queries and only fights with
@@ -135,7 +172,8 @@ from a `ThreadPoolExecutor`; then **casts before the first death**; then the pul
 boss_percentage (boss HP left), fight_percentage (WCL fightPercentage, phases/council aware), duration_seconds, absolute_start_ms,
 pull_time, participants {label: class}, phase, phase_timeline [[name, seconds]], deaths [...], damage_taken [...], damage_done [...],
 healing_done [...], parses {label: {dps, hps}}, interrupts {label: n}, dispels {label: n},
-consumables {label: {flask, food, vantus, rune, prepot}}, consumable_use {label: {combat_potion, healing_potion, mana_potion, healthstone}}, has_extras`.
+consumables {label: {flask, food, vantus, rune, prepot}}, consumable_use {label: {combat_potion, healing_potion, mana_potion, healthstone}}, has_extras,
+pulled_by {player, class, ability, offset_ms (int, from fight start), kind (damage|cast), via_pet} or None`.
 
 - `deaths[i]`: `player, actor_id, class, seconds_into_fight, ability (killing blow), recap, window_damage, top_contributor, biggest_hit,
   one_shot, hits_in_window`; first death additionally `casts [[seconds_before, name]], defensives [...], has_cast_data`.
@@ -143,6 +181,7 @@ consumables {label: {flask, food, vantus, rune, prepot}}, consumable_use {label:
   uptime_seconds, times, sources`.
 
 Console prints per report: night type, `[new report] / [unchanged - cached] / [changed since last run - re-downloading new fights]`,
+per fight of new/changed reports `<boss> fight N: D deaths, E damage events, pulled by <name> (<ability>, +0.05 s)` (or `puller unknown`),
 `-> 0 pulls used ...` hints, and `WCL API calls this run: N (of which M re-downloaded recent reports) - cache hits: K`.
 
 ## 6. Cache (`cache.py`)
@@ -177,7 +216,7 @@ cannot be decoded empties only its own tab), and
 **Payload** (`dash/payload.py`): `<script type='application/gzip+base64' id='data_tabN'>` — gzip+base64 JSON, inflated with
 `DecompressionStream`; `--uncompressed` embeds `application/json`. Per pull: `i,n,t,k,p (boss HP%),fp (fight%),d,a,o,ph,pt,code,fid,
 parts,specs,parses,deaths (recap capped 8; first death has hc/def/cs),dt [[player,ability,hits,amount,(times for avoidable)]],dd,hd,
-ir,ds,cons {name:[flags in cats order]},hx`. Boss level: `boss,diff,avoidable,ignored,break_minutes,busy,src {ability:[top sources]},cats`.
+ir,ds,cons {name:[flags in cats order]},hx,pb [label,ability,offset_ms,'d'|'c'] or null`. Boss level: `boss,diff,avoidable,ignored,break_minutes,busy,src {ability:[top sources]},cats`.
 
 **Tab order**: Home · bosses Normal→Heroic→Mythic then WCL zone order (`BOSS_ORDER` pins) · Raid (per night type) · Players · Mythic+.
 Tabs are an ARIA tablist with arrow-key navigation; deep links `#tabN` and `#tabN:section` (`prog,sum,dd,hd,deaths,dt,prep,util`).
@@ -194,7 +233,7 @@ outlier, avoidable outlier, flask/food missing, idle share of last night, regula
 difficulty), M+ met/total. `[DECISION]` default `anonymous`; `named` = private RL build; `off`.
 
 **Boss tab sections (JS, in order)**: Pulls grid (boss HP band, fight % line when it differs >1 pt, phase, breaks) · KPI tiles ·
-Progression (inline-SVG HP chart + "Show the N pulls as a table", breaks table, **Phases**: wipes by phase + **time-to-phase** chart/table, per-night table) · Summary ·
+Progression (inline-SVG HP chart + "Show the N pulls as a table" incl. a **Pulled by** column, breaks table, **Phases**: wipes by phase + **time-to-phase** chart/table, per-night table) · Summary (+ **Who pulled** table: Player / Pulls / Share / Most used opener, Unknown row) ·
 Damage done / Healing done (role groups, parse, active DPS, median/best, box plot) · Deaths (first-death KPI tiles incl. "no defensive
 cast", charts, histogram, players table, first-death table with **Defensives cast** + recap incl. casts; single pull = all deaths) ·
 Damage taken (KPI tiles, charts, heatmap, avoidable timing histogram, players table with Role + Hide tanks, abilities table with Cast by /
@@ -204,6 +243,15 @@ Section headings are `h2` / `h3` (no `h4`/`h5` in `dash.js`); Plotly titles are 
 
 **Raid tab**: night report (idle/trash aware), attendance matrix (main nights), average parse across kills, farm kill times.
 `[DECISION]` no raw cross-boss sums.
+
+**Players tab**: static Python view + a JS panel (`renderPlayersTab()`). `[CHANGED 2026-09-29]` the panel also renders without a filter:
+a **Who pulls first** matrix (columns Player | Total | boss tabs in tab order with short heads such as `Nek'zali H` via `shortBossHeads()`, full title in the
+th `title` / `aria-label` (optional 3rd `tbl()` head element), N / H / M legend in the footnote; sticky Player column and tight padding via `table.pull-matrix`, Unknown row,
+one row per **participant** of the counted pulls (players who never pulled show dashes / 0, after the pullers; caption "P of N players started X of Y boss pulls"),
+limit 15; `pullerMatrix()` / `pullerMatrixHeads()`), under the static view when
+unfiltered and under the filtered tables when Nights / Raid night / Player filters are active; directly below it (same filter predicate)
+the **All pulls** table (`allPullsHtml()` / pure `allPullRows()`): every pull of every boss tab and difficulty, one row each, columns
+Boss (gotab button) | Night | Pull | Started | Result | Duration | Deaths | Pulled by | Ended in, chronological by payload `a`, limit 25.
 
 **Accessibility**: `[ADDED 2026-09-23]` tablist roles, real buttons for pull boxes/progress boxes/gotab links, focus rings, sortable
 headers are `<button>`s with `aria-sort` on the `th`, visible captions (`[CHANGED 2026-09-24]`, were sr-only), skip link, lightened class/parse
@@ -251,6 +299,10 @@ combat-log realm names to slugs via WCL's server list. `[CAVEAT]` Only an in-gam
 
 ## 11. Open items / next steps
 
+- `[ADDED 2026-09-25]` **Next phase proposed:** per-player combat analysis (DPS / healer / tank / RL views) — design + roadmap in `docs/plans/2026-09-25-player-analysis-design.md`,
+  research in `docs/research/2026-09-25-player-analysis/`. `[TODO]` user approval of decisions Q1–Q10 (design §9) before any implementation; Phase 0 (hygiene: Buffs `targetID` leak,
+  `nextPageTimestamp` on aliases, `filterExpression` as variable, `rateLimitData`, spec table, fixture recorder) is startable next session. `[CAVEAT]` the `targetID` leak (externals
+  list can include buffs the dying player cast on others) and the missing `nextPageTimestamp` are known bugs in `attach_casts()` / the aliased event fetchers, not fixed yet.
 - `[CHANGED 2026-09-24]` Folder reorganisation (`config/`, `data/`, `dashboards/`, `docs/`, `path.py`) - see `docs/CHANGES_2026-09-24.md`.
   `[TODO]` optional second step: move the root modules into a `wcl/` package (touches 12 imports, `python -m wcl.mplus`, systemd, test bootstrap).
 - `[ADDED 2026-09-24]` Whole-project review `docs/reviews/REVIEW_2026-09-24.md` (32 verified bugs/risks, ranked) and phased `docs/ROADMAP_2026-09-24.md`;
@@ -272,6 +324,12 @@ combat-log realm names to slugs via WCL's server list. `[CAVEAT]` Only an in-gam
   `_exclude_bosses` in nights.json (Nymrissa Wavecaller). `[CAVEAT]` `"*"` in avoidable.json is special-cased in `load_avoidable()`.
 - `[TODO]` Check the Preparation table once against a pull you know: pre-pot window is 5 s before → 1.5 s after the pull
   (`PREPOT_BEFORE_MS/AFTER_MS`), rune patterns are guesses for this expansion (`consumables.json`).
+  `[CAVEAT 2026-09-29]` **WCL returns no events before a fight's startTime** (verified with and without `fightIDs`), so the 5 s before
+  the pull are never seen: the "prepot" flag only catches potions pressed in the first 1.5 s and under-reports. Same reason
+  `PULL_TOLERANCE_MS` only guards synthetic input. `[TODO]` decide whether pre-pots need another source (e.g. the potion buff at fight start).
+- `[CAVEAT 2026-09-29]` **Who pulled on self-starting bosses**: Ula'tek starts on its own (proximity / RP); in 3 of 19 prog pulls the first
+  friendly attack came 372-453 ms after fight start, so the credited player is the first attacker, not a true puller. Offsets ≥ ~300 ms
+  are the tell (the pull table shows the offset). Body pulls are credited the same way. See `docs/CHANGES_2026-09-29.md`.
 
 - `[TODO]` User: add `DIFFICULTIES=normal,heroic,mythic` to `.env` (Claude Code cannot edit it); revoke the leaked token (see CHANGES).
 - `[TODO]` Visual check of the deeper boss-tab sections in a real (non-headless) browser, including sticky tab / section nav while scrolling;
@@ -280,7 +338,7 @@ combat-log realm names to slugs via WCL's server list. `[CAVEAT]` Only an in-gam
   known-good pull and adjust `consumables.json` (rune name!) / `defensives.json`.
 - `[TODO]` Optional: weekly cron/systemd build + Discord post; hosting (GitHub/Cloudflare Pages) would remove the size ceiling entirely.
 - `[TODO]` Optional: per-player defensive lookups for *every* death in the single-pull view (currently first death only).
-- `[CAVEAT]` `tests/fixtures/` is ~4 MB; if this bothers you, pick an even smaller report for `make_fixtures.py`.
+- `[CAVEAT]` `tests/fixtures/` is ~4.5 MB; if this bothers you, pick an even smaller report for `make_fixtures.py`.
 
 ## 12. Timeline of notable changes (compressed)
 
@@ -302,3 +360,7 @@ combat-log realm names to slugs via WCL's server list. `[CAVEAT]` Only an in-gam
 13. `[CHANGED] 2026-09-24` Folder reorganisation: `config/` (edited), `data/` (generated), `dashboards/` (output), `docs/`; `path.py`.
     Details: `docs/CHANGES_2026-09-24.md`.
 14. `[CHANGED] 2026-09-24` Dashboard redesign (Tasks 1-12 of `docs/plans/2026-09-24-dashboard-redesign.md`) — details: `docs/CHANGES_2026-09-24.md`.
+15. `[ADDED] 2026-09-25` Delegation policy (§0) and the per-player combat analysis design proposal
+    (`docs/plans/2026-09-25-player-analysis-design.md`, not yet approved). Details: `docs/CHANGES_2026-09-25.md`.
+16. `[ADDED] 2026-09-29` Who pulled: `pulled_by` per pull (collector), payload `pb`, boss-tab "Who pulled" table + "Pulled by" column,
+    Players-tab "Who pulls first" matrix. Plan `docs/plans/2026-09-29-who-pulled.md`; details: `docs/CHANGES_2026-09-29.md`.

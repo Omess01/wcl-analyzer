@@ -58,3 +58,19 @@ def test_night_classification_and_labels(bosses, offline):
     night = next(iter(nights))
     # the fixture report is a Wednesday -> open night under MAIN_RAID_DAYS=Thu,Sun
     assert night.endswith(" open") and pulls[0]["night_type"] == "open"
+
+
+def test_every_pull_has_a_puller(bosses):
+    from collect_data import PULL_TOLERANCE_MS, PULL_WINDOW_MS
+    pulls = [p for ps in bosses.values() for p in ps]
+    assert all("pulled_by" in p for p in pulls)
+    known = [p for p in pulls if p["pulled_by"]]
+    # the fixture night: every pull opens with a participant's own damage within the first half second
+    assert len(known) == len(pulls) >= 3
+    for p in known:
+        pb = p["pulled_by"]
+        assert set(pb) == {"player", "class", "ability", "offset_ms", "kind", "via_pet"}
+        assert pb["player"] in p["participants"] and pb["class"] == p["participants"][pb["player"]]
+        assert -PULL_TOLERANCE_MS <= pb["offset_ms"] <= PULL_WINDOW_MS
+        assert pb["kind"] in ("damage", "cast") and isinstance(pb["via_pet"], bool)
+        assert pb["ability"] and not pb["ability"].startswith("Ability ")

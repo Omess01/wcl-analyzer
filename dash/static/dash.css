@@ -138,6 +138,16 @@ thead th { background:var(--surface-raised); font-weight:600; color:var(--ink-di
 tbody tr:last-child td { border-bottom:none; }
 tbody tr:hover { background:var(--surface-raised); }
 td.right, th.right { text-align:right; }
+/* "Who pulls first" matrix: the Player column stays put while the boss columns scroll sideways; opaque cells so
+   the scrolled columns do not show through, the header cell on the header surface, row hover kept on the sticky cell */
+table.pull-matrix th:first-child, table.pull-matrix td:first-child { position:sticky; left:0; z-index:2; background:var(--surface-card); box-shadow:inset -1px 0 0 var(--border); }
+table.pull-matrix thead th:first-child { background:var(--surface-raised); z-index:3; }
+table.pull-matrix tbody tr:hover td:first-child { background:var(--surface-raised); }
+/* 16 short boss columns fit one 1440 px screen: tighter padding, no header letter-spacing, sort-arrow gap only on the sorted column */
+table.pull-matrix th, table.pull-matrix td { padding-left:var(--sp-1); padding-right:var(--sp-2); }
+table.pull-matrix thead th { letter-spacing:0; }
+table.pull-matrix th button { gap:0; }
+table.pull-matrix th[aria-sort] button { gap:var(--sp-1); }
 th button { appearance:none; background:none; border:none; cursor:pointer; padding:0; margin:0; color:inherit; font:inherit; text-transform:inherit; letter-spacing:inherit; display:inline-flex; align-items:center; gap:var(--sp-1); min-height:24px; }
 th button::after { content:''; width:0; height:0; opacity:0; }
 th[aria-sort='ascending'] button::after  { opacity:1; border-left:4px solid transparent; border-right:4px solid transparent; border-bottom:5px solid var(--accent); }

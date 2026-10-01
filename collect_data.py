@@ -6,8 +6,9 @@ Per pull we know: result, boss % and fight %, duration, when it happened,
 who participated, every death (who / when / killing blow / what really did
 the damage / defensives cast before the first death), damage taken per
 player x ability, damage/healing done, interrupts, dispels, consumables at
-pull start and - where WCL provides phase data - when each phase was
-reached and which phase the pull ended in.
+pull start, who pulled (the first friendly action on an enemy) and - where
+WCL provides phase data - when each phase was reached and which phase the
+pull ended in.
 
 Filters (mirroring WCL's Multiple Report Analysis selection UI):
   - difficulties        Heroic / Mythic / Normal / LFR
@@ -151,6 +152,27 @@ query ReportNPCs($code: String!) {
 }
 """
 
+# Which NPC actors were enemies in each fight and which pet belonged to whom. Kept
+# separate from FIGHTS_QUERY so the cached fight lists stay valid. The fight list's
+# friendlyPets is authoritative: masterData leaves petOwner empty for some guardians
+# (Ancestor, Hati, ...); masterData is only the fallback.
+PULL_ACTORS_QUERY = """
+query ReportPullActors($code: String!) {
+    reportData {
+        report(code: $code) {
+            masterData {
+                actors(type: "Pet") { id petOwner }
+            }
+            fights {
+                id
+                enemyNPCs { id }
+                friendlyPets { id petOwner }
+            }
+        }
+    }
+}
+"""
+
 # Raw damage-taken events for one pull (paginated via nextPageTimestamp).
 DAMAGE_TAKEN_QUERY = """
 query FightDamageTaken($code: String!, $fightID: Int!, $start: Float!, $end: Float!) {
@@ -213,12 +235,24 @@ CASTS_VERSION = "v2"      # v2: + buffs applied to the dying player (externals)
 CONSUMABLES_VERSION = "v1"
 PREPOT_BEFORE_MS = 5000   # combat potions cast this long before the pull count as a pre-pot ...
 PREPOT_AFTER_MS = 1500    # ... up to this long after the pull started
+PULLER_VERSION = "v1"
+PULL_TOLERANCE_MS = 1000  # a friendly action this long BEFORE fight start still counts as the pull. In practice WCL
+                          # stores no events before a fight's startTime, so this only guards the rule's edge.
+PULL_WINDOW_MS = 5000     # ... and up to this long after it; nothing in the window -> puller unknown (body pull / RP start)
+PULL_DAMAGE_LIMIT = 1000  # events come time-ordered and only the earliest matter: one page is enough
+PULL_CAST_LIMIT = 500
+# Casts that engage an enemy without dealing damage (a tank's taunt pull). Every other cast
+# counts only when its ability also damages an enemy in the window (see pull_initiator).
+PULL_TAUNTS = frozenset({"taunt", "growl", "dark command", "death grip", "hand of reckoning", "provoke", "torment",
+                         "challenging shout"})
 
 _phase_warning_shown = False
 _rankings_warning_shown = False
 _bundle_warning_shown = False
 _casts_warning_shown = False
 _cons_warning_shown = False
+_puller_warning_shown = False
+_pull_actors_warning_shown = False
 _warn_lock = threading.Lock()
 _bundle_extras_ok = True   # False once WCL rejected CombatantInfo / Interrupts / Dispels -> minimal bundle
 
@@ -880,6 +914,134 @@ def consumable_use(events: list[dict], actors: dict, lab: Labeller, participants
 
 
 # --------------------------------------------------------------------------
+# Who pulled: the first friendly action on an enemy at fight start
+# --------------------------------------------------------------------------
+
+def get_pull_actors(code: str) -> dict:
+    """
+    {fight_id: {"enemies": {NPC actor ids hostile in that fight}, "pets": {pet actor id: owner actor id}}}
+    for every fight of the report (one cached report-level query). Empty on WCL errors:
+    every puller of the report is then unknown.
+    """
+    try:
+        data = cq(PULL_ACTORS_QUERY, {"code": code})
+    except WCLError as exc:
+        _warn_once("_pull_actors_warning_shown", f"  (enemy / pet lists unavailable - pullers will be unknown: {str(exc)[:160]})")
+        return {}
+    report = data["reportData"]["report"] or {}
+    global_pets = {a["id"]: a["petOwner"] for a in (report.get("masterData") or {}).get("actors", []) or []
+                   if a.get("petOwner") is not None}
+    out = {}
+    for f in report.get("fights") or []:
+        pets = dict(global_pets)
+        pets.update({p["id"]: p["petOwner"] for p in f.get("friendlyPets") or [] if p.get("petOwner") is not None})
+        out[f["id"]] = {"enemies": {n["id"] for n in f.get("enemyNPCs") or []}, "pets": pets}
+    return out
+
+
+def _puller_key(code: str, fight_id: int) -> str:
+    return f"puller:{PULLER_VERSION}:{code}:{fight_id}"
+
+
+def get_pull_events(code: str, fights: list[dict], needs_refresh, pool: ThreadPoolExecutor) -> dict:
+    """
+    {fight_id: {"damage": [events], "casts": [events]}}: every friendly damage and cast
+    event from PULL_TOLERANCE_MS before each pull to PULL_WINDOW_MS after it. Batched
+    CASTS_BATCH fights per request via aliases (two per fight), cached per fight under
+    entry:puller:<version>:<code>:<fid>; a WCL error degrades the batch to "unknown".
+    """
+    out, missing = {}, []
+    for f in fights:
+        refresh = needs_refresh(f)
+        e = get_entry(_puller_key(code, f["id"]), refresh=refresh)
+        if e is None:
+            missing.append((f, refresh))
+        else:
+            out[f["id"]] = e
+    if not missing:
+        return out
+
+    def fetch(batch):
+        parts = []
+        for f, _ in batch:
+            fid = f["id"]
+            s = int(f["startTime"]) - PULL_TOLERANCE_MS
+            e = min(int(f["startTime"]) + PULL_WINDOW_MS, int(f["endTime"]))
+            parts.append(f"pbd_{fid}: events(dataType: DamageDone, hostilityType: Friendlies, fightIDs: [{fid}], "
+                         f"startTime: {s}, endTime: {e}, limit: {PULL_DAMAGE_LIMIT}) {{ data }}")
+            parts.append(f"pbc_{fid}: events(dataType: Casts, hostilityType: Friendlies, fightIDs: [{fid}], "
+                         f"startTime: {s}, endTime: {e}, limit: {PULL_CAST_LIMIT}) {{ data }}")
+        q = "query PullEvents($code: String!) { reportData { report(code: $code) { " + " ".join(parts) + " } } }"
+        try:
+            data = run_query(q, {"code": code})
+        except WCLError as exc:
+            _warn_once("_puller_warning_shown", f"  (pull-start events unavailable - pullers will be unknown: {str(exc)[:160]})")
+            return {}
+        count_api_call(1, sum(1 for _, r in batch if r))
+        rep = data["reportData"]["report"] or {}
+        res = {}
+        for f, _ in batch:
+            entry = {"damage": (rep.get(f"pbd_{f['id']}") or {}).get("data") or [],
+                     "casts": (rep.get(f"pbc_{f['id']}") or {}).get("data") or []}
+            put_entry(_puller_key(code, f["id"]), entry)
+            res[f["id"]] = entry
+        return res
+
+    batches = [missing[i:i + CASTS_BATCH] for i in range(0, len(missing), CASTS_BATCH)]
+    for res in pool.map(fetch, batches):
+        out.update(res)
+    return out
+
+
+def pull_initiator(damage_events: list[dict], cast_events: list[dict], fight: dict, actors: dict, lab: Labeller,
+                   participants: dict, hostile_ids: set, pet_owner: dict, ability_names: dict) -> dict | None:
+    """
+    Who started the fight: the participant (pet -> owner) behind the earliest friendly
+    `damage` or `cast` event on an enemy NPC (`hostile_ids`) with a timestamp in
+    [start - PULL_TOLERANCE_MS, start + PULL_WINDOW_MS]. `begincast` never counts, nor
+    do casts on players or on WCL's targetless "Environment" actor. A cast only counts
+    when its ability also deals damage to an enemy in the window or is a taunt
+    (PULL_TAUNTS): WCL logs self-buffs (Ascendance, Metamorphosis, ...) with the
+    caster's current target, so "cast on the boss" alone is not an attack. Events at
+    the same millisecond: damage before casts, then log order. Returns None when
+    nothing qualifies (body pull, RP start, no data).
+    """
+    start = fight["startTime"]
+    lo, hi = start - PULL_TOLERANCE_MS, start + PULL_WINDOW_MS
+
+    def hits_enemy(ev, kind):
+        ts = ev.get("timestamp")
+        return ev.get("type") == kind and ev.get("targetID") in hostile_ids and ts is not None and lo <= ts <= hi
+
+    damage = [ev for ev in damage_events or [] if hits_enemy(ev, "damage")]
+    damaging = {ev.get("abilityGameID") for ev in damage}
+    casts = [ev for ev in cast_events or [] if hits_enemy(ev, "cast")
+             and (ev.get("abilityGameID") in damaging or ability_names.get(ev.get("abilityGameID"), "").lower() in PULL_TAUNTS)]
+    ranked = sorted([(ev["timestamp"], 0, i, "damage", ev) for i, ev in enumerate(damage)]
+                    + [(ev["timestamp"], 1, i, "cast", ev) for i, ev in enumerate(casts)], key=lambda r: r[:3])
+    for ts, _, _, kind, ev in ranked:
+        sid = ev.get("sourceID")
+        actor, via_pet = actors.get(sid), False
+        if actor is None and sid in pet_owner:
+            actor, via_pet = actors.get(pet_owner[sid]), True
+        if not actor:
+            continue
+        label = lab.actor_label(actor)
+        if label not in participants:
+            continue
+        aid = ev.get("abilityGameID")
+        return {
+            "player": label,
+            "class": participants.get(label) or actor.get("class") or "Unknown",
+            "ability": ability_names.get(aid, f"Ability {aid}"),
+            "offset_ms": int(round(ts - start)),
+            "kind": kind,
+            "via_pet": via_pet,
+        }
+    return None
+
+
+# --------------------------------------------------------------------------
 # Casts before the first death (defensive usage)
 # --------------------------------------------------------------------------
 
@@ -1331,6 +1493,8 @@ def collect(
 
             # ---- batched per-fight tables, then events + rankings from the pool
             bundles = get_fight_bundles(code, [f for f, _ in selected], needs_refresh, pool)
+            pull_actors = get_pull_actors(code)
+            pull_events = get_pull_events(code, [f for f, _ in selected], needs_refresh, pool)
 
             def fetch_fight(item):
                 fight, participants = item
@@ -1367,6 +1531,12 @@ def collect(
                 if fid in cons_casts:
                     for name in participants:
                         consumables.setdefault(name, {})["prepot"] = name in prepotted
+                fight_actors = pull_actors.get(fid) or {}
+                # no enemy list (query failed / WCL changed): any NPC but the targetless Environment actor (id -1)
+                hostile_ids = fight_actors.get("enemies") or {i for i in npc_names if i is not None and i >= 0}
+                pev = pull_events.get(fid) or {}
+                pulled_by = pull_initiator(pev.get("damage"), pev.get("casts"), fight, actors, lab, participants,
+                                           hostile_ids, fight_actors.get("pets") or {}, ability_names)
                 key = (fight["name"], DIFFICULTY_NAMES[fight["difficulty"]])
                 absolute_start_ms = report["startTime"] + fight["startTime"]
                 pull_dt = datetime.fromtimestamp(absolute_start_ms / 1000, tz=tz)
@@ -1403,10 +1573,13 @@ def collect(
                     "consumables": consumables,          # {player: {flask, food, vantus, rune, prepot}}
                     "consumable_use": potions,           # {player: {combat_potion, healing_potion, mana_potion, healthstone}} during the pull
                     "has_extras": bool(bundle.get("extras")),
+                    "pulled_by": pulled_by,              # {player, class, ability, offset_ms, kind, via_pet} or None
                 }
                 bosses.setdefault(key, []).append(pull)
                 if changed or seen_end is None:
-                    new_lines.append(f"    {fight['name']} fight {fid}: {len(deaths)} deaths, {len(events)} damage events")
+                    puller = (f"pulled by {pulled_by['player']} ({pulled_by['ability']}, {pulled_by['offset_ms'] / 1000:+.2f} s)"
+                              if pulled_by else "puller unknown")
+                    new_lines.append(f"    {fight['name']} fight {fid}: {len(deaths)} deaths, {len(events)} damage events, {puller}")
             for line in new_lines:
                 print(line)
             meta[code] = report["endTime"]

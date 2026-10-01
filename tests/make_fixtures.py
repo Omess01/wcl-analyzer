@@ -46,6 +46,8 @@ def main(code: str = DEFAULT_CODE) -> None:
 # WCL's damage/healing tables carry every player's gear, talents and per-ability breakdown;
 # the collector only reads name/id/type/icon/total/activeTime/itemLevel. Combatant-info events
 # carry full stat blocks; only sourceID + auras are read. Dropping the rest keeps fixtures small.
+# Pull-start entries ({"damage": [...], "casts": [...]}, who pulled) are reduced to the same
+# event fields: the detection reads timestamp / type / sourceID / targetID / abilityGameID only.
 _TABLE_DROP = {"gear", "talents", "abilities", "damageAbilities", "targets", "given", "taken", "pets"}
 _CINFO_KEEP = {"timestamp", "type", "fight", "sourceID", "auras", "specID"}
 _EVENT_KEEP = {"timestamp", "type", "sourceID", "targetID", "abilityGameID", "fight", "tick", "amount", "absorbed",
@@ -63,6 +65,12 @@ def slim(cache_dir: str) -> None:
         events = (((data.get("reportData") or {}).get("report") or {}).get("events") or {}) if isinstance(data, dict) else {}
         if events.get("data"):
             events["data"] = [{k: v for k, v in ev.items() if k in _EVENT_KEEP} for ev in events["data"]]
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            continue
+        if isinstance(data, dict) and set(data) == {"damage", "casts"}:   # pull-start events (puller entries)
+            for key in ("damage", "casts"):
+                data[key] = [{k: v for k, v in ev.items() if k in _EVENT_KEEP} for ev in data.get(key) or []]
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f)
             continue

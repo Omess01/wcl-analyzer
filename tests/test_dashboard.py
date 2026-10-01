@@ -234,7 +234,7 @@ def test_table_markup_matches_example():
 
 def test_js_table_helper_mirrors_python():
     js = static_file("dash.js")
-    assert "class='scroller'" in js and "aria-label='Sort by ${escH(h[0])}'" in js
+    assert "class='scroller'" in js and "aria-label='Sort by ${escH(full)}'" in js and "full = h[2] || h[0]" in js   # optional 3rd head element
     assert "sorted-asc" not in js and "sorted-desc" not in js
     # bar() builds the class with a template (`bar${heal ? ' heal' : ''}`); the rendered markup is checked in test_js_table_limit_markup
     assert "<div class='bar'><span" not in js and "<span class='bar${heal ? ' heal' : ''}' aria-hidden='true'><i" in js
@@ -1028,3 +1028,173 @@ def test_py_skip_rule_counts_non_zero_bar_categories():
     assert should_skip_chart(go.Figure(go.Bar(x=["P1", "P2", "P3"], y=[2, 1, 0]))) is False
     assert should_skip_chart(go.Figure([go.Bar(x=["a"], y=[1]), go.Bar(x=["b"], y=[1])])) is False
     assert should_skip_chart(go.Figure(go.Bar(x=["a"], y=[3]))) is True
+
+
+# ---------------- Who pulled (plan 2026-09-29, Task B) ----------------
+
+def _synthetic_pull(fid: int, pulled_by, night="Thu 2026-09-10", player="Omess", cls="DemonHunter") -> dict:
+    """The smallest pull dict pull_grid() / pull_payload() accept (the offline fixture has no pulled_by yet)."""
+    return {"report_code": "abc", "report_title": "Raid <night>", "night": night, "night_type": "main", "fight_id": fid,
+            "kill": False, "boss_percentage": 55.0, "fight_percentage": 55.0, "duration_seconds": 120, "absolute_start_ms": 1000 * fid,
+            "pull_time": "20:00", "participants": {player: cls, "Healbot": "Priest"}, "phase": "", "phase_timeline": [],
+            "deaths": [], "damage_taken": [], "damage_done": [], "healing_done": [], "pulled_by": pulled_by}
+
+
+def test_payload_emits_puller():
+    pulls = [_synthetic_pull(1, {"player": "Omess", "class": "DemonHunter", "ability": "Throw Glaive", "offset_ms": 120,
+                                 "kind": "damage", "via_pet": False}),
+             _synthetic_pull(2, {"player": "Healbot", "class": "Priest", "ability": "Shadow Word: Pain", "offset_ms": -300,
+                                 "kind": "cast", "via_pet": False}),
+             _synthetic_pull(3, None)]
+    del pulls[2]["pulled_by"]          # a pull from an older collector: key missing = unknown
+    pulls.append(_synthetic_pull(4, None))
+    _, text = pull_payload(pulls, "Boss", "Heroic", {}, compress=False)
+    out = [p["pb"] for p in json.loads(text.replace("<\\/", "</"))["pulls"]]
+    assert out == [["Omess", "Throw Glaive", 120, "d"], ["Healbot", "Shadow Word: Pain", -300, "c"], None, None]
+
+
+def test_pull_grid_tooltip_names_puller():
+    from dash.payload import pull_grid
+    pulls = [_synthetic_pull(1, {"player": "O'Mess<x>", "class": "DemonHunter", "ability": "Throw Glaive", "offset_ms": 0,
+                                 "kind": "damage", "via_pet": False}, player="O'Mess<x>"),
+             _synthetic_pull(2, None)]
+    grid = pull_grid(pulls, "tab1")
+    titles = re.findall(r"title='(Pull #[^']*)'", grid)
+    assert titles[0] == "Pull #1 - Raid &lt;night&gt; - fight 1 - pulled by O&#x27;Mess&lt;x&gt; - click to inspect"
+    assert "pulled by" not in titles[1]
+    assert "pulled by O&#x27;Mess&lt;x&gt;. Click to inspect" in grid
+
+
+def _pb(name, ability="Throw Glaive", off=0, kind="d", cls="DemonHunter"):
+    return {"pb": [name, ability, off, kind], "parts": {name: cls}}
+
+
+def test_js_puller_rows():
+    quickjs = pytest.importorskip("quickjs")
+    ctx = _table_helpers(quickjs)
+    pulls = [_pb("Zed"), _pb("Omess", "Throw Glaive"), _pb("Omess", "Fel Rush"), _pb("Omess", "Fel Rush"),
+             _pb("Amy", "Frostbolt", cls="Mage"), {"pb": None, "parts": {}}, {"parts": {}}]
+    r = json.loads(ctx.eval(f"JSON.stringify(pullerRows({json.dumps(pulls)}))"))
+    assert r["total"] == 7 and r["unknown"] == 2 and r["unknownShare"] == 28.6
+    # pulls desc, then name ascending (Amy before Zed at 1 pull each)
+    assert [(x["name"], x["pulls"], x["share"]) for x in r["rows"]] == [("Omess", 3, 42.9), ("Amy", 1, 14.3), ("Zed", 1, 14.3)]
+    assert r["rows"][0]["opener"] == "Fel Rush" and r["rows"][0]["openerCount"] == 2 and r["rows"][0]["cl"] == "DemonHunter"
+    assert r["rows"][1]["cl"] == "Mage"
+    empty = json.loads(ctx.eval("JSON.stringify(pullerRows([]))"))
+    assert empty == {"rows": [], "unknown": 0, "unknownShare": 0, "total": 0}
+    # opener ties are broken by name so the table is stable
+    tie = json.loads(ctx.eval(f"JSON.stringify(pullerRows({json.dumps([_pb('A', 'b'), _pb('A', 'a')])}))"))
+    assert tie["rows"][0]["opener"] == "a" and tie["rows"][0]["share"] == 100
+
+
+def test_js_puller_matrix():
+    quickjs = pytest.importorskip("quickjs")
+    ctx = _table_helpers(quickjs)
+    lists = [{"key": "tab0", "label": "Boss A (Heroic)", "pulls": [_pb("Omess"), _pb("Amy", cls="Mage"), {"pb": None, "parts": {}}]},
+             {"key": "tab1", "label": "Boss B (Heroic)", "pulls": []},          # filtered to nothing: no column
+             {"key": "tab2", "label": "Boss C (Mythic)", "pulls": [_pb("Amy", cls="Mage"), _pb("Amy", cls="Mage"), _pb("Omess")]}]
+    m = json.loads(ctx.eval(f"JSON.stringify(pullerMatrix({json.dumps(lists)}))"))
+    assert [c["key"] for c in m["cols"]] == ["tab0", "tab2"] and m["cols"][1]["label"] == "Boss C (Mythic)"
+    assert [(r["name"], r["total"], r["counts"]) for r in m["rows"]] == [("Amy", 3, {"tab0": 1, "tab2": 2}), ("Omess", 2, {"tab0": 1, "tab2": 1})]
+    assert m["rows"][0]["cl"] == "Mage"
+    assert m["unknown"] == {"counts": {"tab0": 1}, "total": 1} and m["total"] == 6
+    none = json.loads(ctx.eval("JSON.stringify(pullerMatrix([{key: 't', label: 'x', pulls: [{pb: null, parts: {}}]}]))"))
+    assert none["rows"] == [] and none["unknown"]["total"] == 1 and none["total"] == 1
+    assert m["participants"] == 2 and m["pullers"] == 2 and none["participants"] == 0 and none["pullers"] == 0
+    # every participant gets a row, also without a pull: total 0, after the pullers, alphabetical among the zeros;
+    # class = most frequent in their pulls (tie -> first seen); parts of unknown-puller pulls count too
+    def pp(pb, parts):
+        return {"pb": [pb, "Throw Glaive", 0, "d"] if pb else None, "parts": parts}
+    lists2 = [{"key": "tab0", "label": "Boss A (Heroic)", "pulls": [
+                  pp("Amy", {"Amy": "Mage", "Zoe": "Priest", "Bob": "Warrior", "Cat": "Druid"}),
+                  pp("Amy", {"Amy": "Mage", "Zoe": "Paladin", "Bob": "Rogue"}),
+                  pp(None, {"Amy": "Mage", "Zoe": "Paladin", "Dan": "Hunter"})]},
+              {"key": "tab1", "label": "Boss B (Heroic)", "pulls": [pp("Cat", {"Cat": "Druid", "Bob": "Rogue", "Omess": "DemonHunter"})]}]
+    m2 = json.loads(ctx.eval(f"JSON.stringify(pullerMatrix({json.dumps(lists2)}))"))
+    assert [(r["name"], r["total"]) for r in m2["rows"]] == [("Amy", 2), ("Cat", 1), ("Bob", 0), ("Dan", 0), ("Omess", 0), ("Zoe", 0)]
+    cl = {r["name"]: r["cl"] for r in m2["rows"]}
+    assert cl == {"Amy": "Mage", "Cat": "Druid", "Bob": "Rogue", "Dan": "Hunter", "Omess": "DemonHunter", "Zoe": "Paladin"}
+    tie = json.loads(ctx.eval("JSON.stringify(pullerMatrix([{key: 't', label: 'x', pulls: [{pb: null, parts: {X: 'Mage'}}, {pb: null, parts: {X: 'Priest'}}]}]))"))
+    assert tie["rows"][0]["cl"] == "Mage"                                          # tie -> first seen
+    zero = next(r for r in m2["rows"] if r["name"] == "Omess")
+    assert zero["counts"] == {} and zero["total"] == 0
+    assert m2["participants"] == 6 and m2["pullers"] == 2 and m2["total"] == 4 and m2["unknown"]["total"] == 1
+    # column order: Player, Total (second, visible without scrolling), then the boss columns in tab order
+    heads = json.loads(ctx.eval(f"JSON.stringify(pullerMatrixHeads({json.dumps(m['cols'])}))"))
+    # short heads (first word + difficulty letter; no clash because the difficulties differ), full title as third element
+    assert heads == [["Player", "str"], ["Total", "num"], ["Boss H", "num", "Boss A (Heroic)"], ["Boss M", "num", "Boss C (Mythic)"]]
+    assert heads[1][0] == "Total"
+    # tbl(): a third head element becomes the th title + the sort button's aria-label; two-element heads are unchanged
+    html = ctx.eval(f"tbl({json.dumps(heads)}, [], 'pull-matrix', 'c')")
+    assert "<th scope='col' data-type='num' class='right' title='Boss A (Heroic)'><button type='button' aria-label='Sort by Boss A (Heroic)'>Boss H</button></th>" in html
+    assert "<th scope='col' data-type='num' class='right'><button type='button' aria-label='Sort by Total'>Total</button></th>" in html
+
+
+REAL_TITLES = {"Nek'zali the Soulcoiler": "Nek'zali", "Entombed Sentinels": "Entombed", "Vashnik the Malignant": "Vashnik",
+               "The Lost Explorers": "Lost", "Sszorak": "Sszorak", "The Twin Fangs": "Twin", "The Coiled Altar": "Coiled", "Ula'tek": "Ula'tek"}
+
+
+def test_js_short_boss_head():
+    quickjs = pytest.importorskip("quickjs")
+    ctx = _table_helpers(quickjs)
+    short = lambda t, w=1: ctx.eval(f"shortBossHead({json.dumps(t)}, {w})")
+    cases = {"The Coiled Altar (Heroic)": "Coiled H", "The Twin Fangs (Normal)": "Twin N", "Ula'tek (Heroic)": "Ula'tek H",
+             "Entombed Sentinels (Heroic)": "Entombed H", "The Lost Explorers (Normal)": "Lost N", "Vashnik the Malignant (Heroic)": "Vashnik H",
+             "Sszorak (Normal)": "Sszorak N", "Nek'zali the Soulcoiler (Normal)": "Nek'zali N", "Nek'zali the Soulcoiler (Mythic)": "Nek'zali M",
+             "Some Boss (LFR)": "Some L", "Supercalifragilistic (Heroic)": "Supercali. H", "No Difficulty": "No"}
+    assert {t: short(t) for t in cases} == cases
+    # two words skip filler words and abbreviate long second words
+    assert short("The Twin Fangs (Normal)", 2) == "Twin Fangs N" and short("Nek'zali the Soulcoiler (Heroic)", 2) == "Nek'zali S. H"
+    # the 16 real columns: no collisions, so every head is one word + difficulty letter
+    titles = [f"{n} ({d})" for d in ("Normal", "Heroic") for n in REAL_TITLES]
+    heads = json.loads(ctx.eval(f"JSON.stringify(shortBossHeads({json.dumps(titles)}))"))
+    assert heads == [f"{REAL_TITLES[n]} {d[0]}" for d in ("Normal", "Heroic") for n in REAL_TITLES]
+    assert len(set(heads)) == 16 and max(map(len, heads)) <= 12
+    # collisions: same first word -> two words (only for the clashing titles), abbreviated when long
+    col = json.loads(ctx.eval("JSON.stringify(shortBossHeads(['Entombed Sentinels (Heroic)', 'Entombed Kings (Heroic)', 'Entombed Sentinels (Normal)', 'Sszorak (Heroic)']))"))
+    assert col == ["Entombed S. H", "Entombed Kings H", "Entombed N", "Sszorak H"]
+    # abbreviations still clash -> unabbreviated second words; identical names -> full titles
+    col2 = json.loads(ctx.eval("JSON.stringify(shortBossHeads(['Entombed Sentinels (Heroic)', 'Entombed Spirits (Heroic)']))"))
+    assert col2 == ["Entombed Sentinels H", "Entombed Spirits H"]
+    same = json.loads(ctx.eval("JSON.stringify(shortBossHeads(['Twin Fangs (Heroic)', 'The Twin Fangs (Heroic)']))"))
+    assert same == ["Twin Fangs (Heroic)", "The Twin Fangs (Heroic)"]
+
+
+def test_js_all_pull_rows():
+    quickjs = pytest.importorskip("quickjs")
+    ctx = _table_helpers(quickjs)
+    lists = [{"key": "tab0", "label": "Boss A (Heroic)", "pulls": [{"i": 1, "a": 3000}, {"i": 2, "a": 5000}]},
+             {"key": "tab1", "label": "Boss B (Heroic)", "pulls": []},
+             {"key": "tab2", "label": "Boss C (Mythic)", "pulls": [{"i": 2, "a": 1000}, {"i": 1, "a": 1000}, {"i": 3, "a": 3000}]}]
+    rows = json.loads(ctx.eval(f"JSON.stringify(allPullRows({json.dumps(lists)}))"))
+    # chronological across bosses; same start: tab order (tab0 before tab2), then pull number
+    assert [(r["tab"], r["p"]["i"]) for r in rows] == [("tab2", 1), ("tab2", 2), ("tab0", 1), ("tab2", 3), ("tab0", 2)]
+    assert rows[0]["label"] == "Boss C (Mythic)" and set(rows[0]) == {"tab", "label", "p"}
+    assert json.loads(ctx.eval("JSON.stringify(allPullRows([]))")) == []
+    assert json.loads(ctx.eval("JSON.stringify(allPullRows([{key: 't', label: 'x', pulls: []}]))")) == []
+
+
+def test_who_pulled_wired_into_boss_and_players_tab():
+    js = static_file("dash.js")
+    assert "<h3>Who pulled</h3>${whoPulledHtml(S)}" in js                       # boss tab Summary, from the selected pulls
+    assert "['Pulled by', 'str']" in js and "${pulledByCell(p)}" in js            # pull table column
+    assert js.count("whoPullsFirstHtml(") == 4                                    # definition + unfiltered + player + night views
+    assert "whoPullsFirstHtml(p => nightOk(p) && G.player in p.parts)" in js and "whoPullsFirstHtml(nightOk)" in js
+    assert "tbl(pullerMatrixHeads(m.cols), rows, 'pull-matrix'," in js            # Total second, sticky Player column
+    assert "</td>${cell(e.total)}${m.cols.map(" in js                             # row cells follow the header order; 0 -> muted dash, data-sort 0
+    assert "const cell = n => `<td data-sort='${n || 0}'>${n ? n : \"<span class='muted'>-</span>\"}</td>`;" in js
+    assert "`${m.pullers} of ${m.participants} player${m.participants === 1 ? '' : 's'} started ${m.total - m.unknown.total} of ${m.total} boss pull" in js
+    assert "if (!m.pullers) return html + emptyHtml('puller data'," in js          # empty state still keyed on pullers
+    # "All pulls" table under the matrix, same keep predicate in all three views, shared row cells with the pull table
+    assert js.count("allPullsHtml(") == 4
+    assert "whoPullsFirstHtml(() => true) + allPullsHtml(() => true)" in js
+    assert "allPullsHtml(p => nightOk(p) && G.player in p.parts)" in js and "allPullsHtml(nightOk)" in js
+    assert "<h2 id='sec_tabPlayers_allpulls'>All pulls</h2>" in js
+    assert "tbl([['Boss', 'str'], ['Night', 'str'], ['Pull', 'num']].concat(PULL_CELL_HEADS)," in js
+    assert "tbl([['Pull', 'num'], ['Night', 'str']].concat(PULL_CELL_HEADS)," in js
+    assert js.count("${pullCells(p)}</tr>") == 2 and js.count("${pulledByCell(p)}") == 1
+    assert "class='gotab linklike' data-tab='${tab}'>${escH(label)}</button>" in js
+    css = static_file("dash.css")
+    assert "table.pull-matrix th:first-child, table.pull-matrix td:first-child { position:sticky; left:0;" in css
+    assert "table.pull-matrix th, table.pull-matrix td { padding-left:var(--sp-1); padding-right:var(--sp-2); }" in css   # 16 columns fit 1440 px
+    assert "tbl(pullerMatrixHeads(m.cols)" in js and "N / H / M = Normal / Heroic / Mythic" in js
