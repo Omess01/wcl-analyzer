@@ -1,0 +1,31 @@
+{
+  "_comment": "Copy to gear_checks.json to change the gear checks shown on player cards. enchantable / socket_slots: \"auto\" or an explicit list of slot numbers (Blizzard inventory order, see slot_names). With \"auto\", a slot is required when STRICTLY MORE than `majority` (0.5 = more than half) of the roster's non-empty items in that slot carry an enchant (enchantable) or at least one gem (socket_slots); so a slot where exactly half the raid enchants (e.g. off hand: dual-wielders vs shields) is not required. An explicit list replaces the auto rule for that check. skip_slots are never checked and do not count towards the average (shirt 3, tabard 17). low_slot_gap: an item this many ilvl or more below the player's own average item level is flagged ('wrist 15 ilvl below your average').",
+  "enchantable": "auto",
+  "socket_slots": "auto",
+  "majority": 0.5,
+  "skip_slots": [
+    3,
+    17
+  ],
+  "low_slot_gap": 15,
+  "slot_names": {
+    "0": "head",
+    "1": "neck",
+    "2": "shoulder",
+    "3": "shirt",
+    "4": "chest",
+    "5": "waist",
+    "6": "legs",
+    "7": "feet",
+    "8": "wrist",
+    "9": "hands",
+    "10": "ring 1",
+    "11": "ring 2",
+    "12": "trinket 1",
+    "13": "trinket 2",
+    "14": "back",
+    "15": "main hand",
+    "16": "off hand",
+    "17": "tabard"
+  }
+}

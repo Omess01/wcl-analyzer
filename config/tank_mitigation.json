@@ -1,0 +1,162 @@
+{
+  "_comment": "Tank active-mitigation ('am') auras and major cooldowns ('major') per tank spec, keyed by the specs.py spec token ('Vengeance', 'Blood', 'Guardian', 'Brewmaster') or '<Spec> <Class>' when two classes share the token ('Protection Paladin', 'Protection Warrior'). 'am' ids are checked against the `buffs` string of every connected hit a tank takes (metrics am / amw on the Players tab); 'major' is validated at build time and used by a later phase. VERIFIED so far: only the four Vengeance ids (Demon Spikes 203819, Metamorphosis 187827, Fiery Brand 207771, Soul Barrier 263648) were seen on the fixture report's tanks. UNVERIFIED: every id of the other five specs is a TWW-era value written from memory. After the first real build with such a tank compare them with data/tank_buffs_seen.json (top buff ids seen on each spec's tanks) and fix what does not match; the build warns about configured ids never seen on a tank of that spec.",
+  "Vengeance": {
+    "am": [
+      {
+        "id": 203819,
+        "name": "Demon Spikes"
+      }
+    ],
+    "major": [
+      {
+        "id": 187827,
+        "name": "Metamorphosis"
+      },
+      {
+        "id": 207771,
+        "name": "Fiery Brand"
+      },
+      {
+        "id": 263648,
+        "name": "Soul Barrier"
+      }
+    ]
+  },
+  "Protection Paladin": {
+    "am": [
+      {
+        "id": 132403,
+        "name": "Shield of the Righteous"
+      }
+    ],
+    "major": [
+      {
+        "id": 31850,
+        "name": "Ardent Defender"
+      },
+      {
+        "id": 86659,
+        "name": "Guardian of Ancient Kings"
+      },
+      {
+        "id": 642,
+        "name": "Divine Shield"
+      },
+      {
+        "id": 387174,
+        "name": "Eye of Tyr"
+      }
+    ]
+  },
+  "Protection Warrior": {
+    "am": [
+      {
+        "id": 132404,
+        "name": "Shield Block"
+      },
+      {
+        "id": 190456,
+        "name": "Ignore Pain"
+      }
+    ],
+    "major": [
+      {
+        "id": 871,
+        "name": "Shield Wall"
+      },
+      {
+        "id": 12975,
+        "name": "Last Stand"
+      },
+      {
+        "id": 23920,
+        "name": "Spell Reflection"
+      }
+    ]
+  },
+  "Blood": {
+    "am": [
+      {
+        "id": 195181,
+        "name": "Bone Shield"
+      },
+      {
+        "id": 194679,
+        "name": "Rune Tap"
+      }
+    ],
+    "major": [
+      {
+        "id": 55233,
+        "name": "Vampiric Blood"
+      },
+      {
+        "id": 81256,
+        "name": "Dancing Rune Weapon"
+      },
+      {
+        "id": 48792,
+        "name": "Icebound Fortitude"
+      },
+      {
+        "id": 48707,
+        "name": "Anti-Magic Shell"
+      }
+    ]
+  },
+  "Guardian": {
+    "am": [
+      {
+        "id": 192081,
+        "name": "Ironfur"
+      }
+    ],
+    "major": [
+      {
+        "id": 22812,
+        "name": "Barkskin"
+      },
+      {
+        "id": 61336,
+        "name": "Survival Instincts"
+      },
+      {
+        "id": 200851,
+        "name": "Rage of the Sleeper"
+      }
+    ]
+  },
+  "Brewmaster": {
+    "am": [
+      {
+        "id": 215479,
+        "name": "Shuffle"
+      }
+    ],
+    "major": [
+      {
+        "id": 120954,
+        "name": "Fortifying Brew"
+      },
+      {
+        "id": 322507,
+        "name": "Celestial Brew"
+      },
+      {
+        "id": 122278,
+        "name": "Dampen Harm"
+      },
+      {
+        "id": 122783,
+        "name": "Diffuse Magic"
+      },
+      {
+        "id": 115176,
+        "name": "Zen Meditation"
+      }
+    ]
+  },
+  "_changelog": [
+    "2026-10-01: created with TWW-era ids. Vengeance ids verified against fixture report 3w1jJ8BZ2m9kMrYG (all four seen on the two tanks); Protection Paladin / Protection Warrior / Blood / Guardian / Brewmaster unverified."
+  ]
+}
