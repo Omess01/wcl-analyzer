@@ -95,7 +95,7 @@ def players_tab(bosses: dict, avoidable_cfg: dict, mode: str = "anonymous", play
     {team_strip(bosses, pm_by_key)}
     <h2>Roster</h2>
     <p class='muted'>Roster-wide view across every pull in the selection, {order_note}. Players with few pulls are hidden by
-    default. Pick a player in the toolbar for their card and per-boss breakdown, or use <code>--player Name</code> to rebuild the whole dashboard for one person's pulls.</p>
+    default. Click a name below (or pick a player in the toolbar) for their card and per-boss breakdown, or use <code>--player Name</code> to rebuild the whole dashboard for one person's pulls.</p>
     {player_table_lowpart(combined, any_avoidable, named)}
     {raid_lead}
     """
@@ -119,8 +119,9 @@ def player_table_lowpart(stats: dict, show_avoidable: bool, by_first_death: bool
         cause = ", ".join(f"{a} ({c})" for a, c in s["causes"].most_common(2)) if s["causes"] else "-"
         low = " class='lowpart'" if s["pulls"] < 0.25 * max_pulls else ""
         avoid_col = f"<td data-sort='{s['avoid_hits'] / n:.2f}'>{s['avoid_hits'] / n:.1f}</td>" if show_avoidable else ""
+        # data-player: dash.js's click-your-name handler (tr[data-player] .player) sets the toolbar Player filter
         rows += (
-            f"<tr{low}><td>{player_cell(name, s['class'])}</td><td>{s['pulls']}</td>"
+            f"<tr{low} data-player='{esc(name)}'><td>{player_cell(name, s['class'])}</td><td>{s['pulls']}</td>"
             f"<td>{s['bosses']}</td><td>{s['first_deaths']}</td><td data-sort='{rate:.3f}'>{rate * 100:.0f}%</td>"
             f"{avoid_col}<td>{esc(cause)}</td></tr>"
         )

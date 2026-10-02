@@ -162,6 +162,9 @@ table.summary td:nth-child(2) { width:110px; }
 td.flag { color:var(--bad); font-weight:650; }
 .spec { color:var(--ink-dim); font-size:var(--fs-micro); }
 .player { font-weight:600; }
+/* click-your-name: a name in a tr[data-player] row sets the toolbar Player filter (dash.js), so it looks clickable */
+tr[data-player] .player { cursor:pointer; text-decoration:underline dotted; text-decoration-color:var(--border-strong); text-underline-offset:3px; }
+tr[data-player] .player:hover { text-decoration-style:solid; text-decoration-color:var(--accent); }
 .role { display:inline-block; font-size:var(--fs-micro); color:var(--ink-dim); border:1px solid var(--border-strong); border-radius:3px; padding:0 4px; margin-left:var(--sp-2); vertical-align:middle; }
 /* "Show all N" under a limited table: a full-width link-style row */
 .show-all { display:block; width:100%; min-height:32px; padding:var(--sp-2) var(--sp-4); text-align:left; background:none; border:none; border-top:1px solid var(--border); color:var(--accent); cursor:pointer; text-decoration:underline; text-underline-offset:2px; font:inherit; font-size:var(--fs-sm); }

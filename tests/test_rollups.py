@@ -151,3 +151,19 @@ def test_prep_rates_synthetic():
     r = prep_rates(pulls)
     assert r["n"] == 3 and abs(r["ff"] - 2 / 3) < 1e-9 and r["rune"] == 0.5
     assert prep_rates([{"consumables": {}}]) is None
+
+
+def test_roster_rows_carry_data_player_for_click_your_name(bosses):
+    """Regression: the static Roster rows had no data-player, so dash.js's click-your-name handler
+    (tr[data-player] .player) ignored clicks on the most obvious names on the Players tab."""
+    for mode in ("anonymous", "named"):
+        html = build_html(bosses, _args(callouts=mode))
+        roster = _table_with_caption(_players_static(html), ROSTER_CAPTION)
+        rows = re.findall(r"<tr([^>]*)><td><span class='player [^']*'>([^<]+)</span>", roster)
+        assert rows and len(rows) == len(_names(bosses))
+        options = set(re.findall(r"<option value='([^']+)' class=", html))
+        for attrs, name in rows:
+            m = re.search(r"data-player='([^']*)'", attrs)
+            assert m and m.group(1) == name, (mode, attrs, name)
+            assert name in options, (mode, name)
+        assert "Click a name below" in _players_static(html)
