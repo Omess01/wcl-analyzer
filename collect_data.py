@@ -37,7 +37,10 @@ import cache
 from cache import cached_query, get_entry, put_entry, count_api_call
 from fetch_reports import fetch_guild_reports
 from path import CONFIG_DIR
-from wcl_client import run_query, WCLError
+from specs import spec_of
+from wcl_client import run_query, WCLError, WCLRateLimited, rate_summary
+from analysis.wipe import wipe_cutoff_s
+from analysis.mitigation import digest_events, TANK_BUFFS_SEEN   # TANK_BUFFS_SEEN: {spec label: Counter}, cleared per collect()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -101,6 +104,7 @@ query ReportFights($code: String!) {
                 fightPercentage
                 encounterID
                 friendlyPlayers
+                wipeCalledTime
             }
         }
     }
@@ -254,6 +258,10 @@ _cons_warning_shown = False
 _puller_warning_shown = False
 _pull_actors_warning_shown = False
 _warn_lock = threading.Lock()
+_unknown_spec_ids: set[int] = set()   # specIDs not in specs.SPECS, warned about once each
+_cinfo_page_warning_shown = False
+_pages_cap_warning_shown = False
+MAX_PAGES = 50   # follow-up pages per events part before _follow_pages gives up (runaway-cursor guard)
 _bundle_extras_ok = True   # False once WCL rejected CombatantInfo / Interrupts / Dispels -> minimal bundle
 
 
@@ -374,6 +382,8 @@ def zone_encounter_order(zone_id: int) -> dict:
         data = cached_query(ZONE_ENCOUNTERS_QUERY, {"id": int(zone_id)})
         encs = ((data.get("worldData") or {}).get("zone") or {}).get("encounters") or []
         return {e["id"]: i for i, e in enumerate(encs)}
+    except WCLRateLimited:
+        raise
     except Exception as exc:
         print(f"  (could not fetch boss order for zone {zone_id}: {exc})")
         return {}
@@ -413,6 +423,8 @@ def fetch_reports_by_code(codes: list[str]) -> list[dict]:
         try:
             data = run_query(REPORT_META_QUERY, {"code": code})
             count_api_call()
+        except WCLRateLimited:
+            raise
         except Exception as exc:
             print(f"  Report {code}: could not fetch ({exc})")
             continue
@@ -568,6 +580,8 @@ def get_phases(report_code: str) -> tuple[dict, dict]:
     """
     try:
         data = cq(PHASES_QUERY, {"code": report_code})
+    except WCLRateLimited:
+        raise
     except Exception as exc:
         _warn_once("_phase_warning_shown", f"  (phase data unavailable, skipping phase breakdown: {exc})")
         return {}, {}
@@ -664,6 +678,48 @@ def _bundle_key(code: str, fight_id: int, extras: bool) -> str:
     return f"bundle:{BUNDLE_VERSION}:{'full' if extras else 'min'}:{code}:{fight_id}"
 
 
+def _follow_pages(code: str, fight: dict, kind: str, alias: str, part_fn, page: dict | None,
+                  query_name: str, var_decl: str = "$code: String!", variables: dict | None = None) -> list[dict]:
+    """
+    Events of one aliased `events(...) { data nextPageTimestamp }` part, following
+    `nextPageTimestamp` until WCL reports no more pages. `page` is the first page
+    (already fetched as part of a batched request); `part_fn(start_ms)` rebuilds the
+    alias text with a new startTime for the single-alias follow-up queries, which
+    use the same `variables` (default {"code": code}). Each follow-up counts as one
+    API call. Raises WCLError like run_query.
+    """
+    page = page or {}
+    data = list(page.get("data") or [])
+    cursor = page.get("nextPageTimestamp")
+    if cursor is None:
+        return data
+    print(f"  (page 2+ needed for {code}:{fight['id']} {kind})")
+    variables = variables if variables is not None else {"code": code}
+    last = None
+    pages = 0
+    # The cursor must strictly advance (timestamps are ints); a repeating or
+    # backwards cursor would otherwise loop or re-fetch the same events.
+    while cursor is not None and (last is None or cursor > last):
+        if pages >= MAX_PAGES:
+            _warn_once("_pages_cap_warning_shown",
+                       f"  (stopped following pages for {code}:{fight['id']} {kind} after {MAX_PAGES} follow-ups)")
+            break
+        pages += 1
+        last = cursor
+        q = f"query {query_name}({var_decl}) {{ reportData {{ report(code: $code) {{ {part_fn(int(cursor))} }} }} }}"
+        res = run_query(q, variables)
+        count_api_call(1)
+        nxt = ((res.get("reportData") or {}).get("report") or {}).get(alias) or {}
+        data.extend(nxt.get("data") or [])
+        cursor = nxt.get("nextPageTimestamp")
+    return data
+
+
+def _cinfo_part(fight: dict, start_ms: int) -> str:
+    return (f"cinfo_{fight['id']}: events(dataType: CombatantInfo, fightIDs: [{fight['id']}], "
+            f"startTime: {int(start_ms)}, endTime: {int(fight['endTime'])}, limit: 200) {{ data nextPageTimestamp }}")
+
+
 def _bundle_query(fights: list[dict], extras: bool) -> str:
     parts = []
     tables = BUNDLE_TABLES if extras else {k: v for k, v in BUNDLE_TABLES.items() if k in ("damage", "healing", "deaths")}
@@ -672,8 +728,7 @@ def _bundle_query(fights: list[dict], extras: bool) -> str:
         for alias, dt in tables.items():
             parts.append(f"{alias}_{fid}: table(dataType: {dt}, fightIDs: [{fid}])")
         if extras:
-            parts.append(f"cinfo_{fid}: events(dataType: CombatantInfo, fightIDs: [{fid}], "
-                         f"startTime: {int(f['startTime'])}, endTime: {int(f['endTime'])}, limit: 200) {{ data }}")
+            parts.append(_cinfo_part(f, f["startTime"]))
     return "query FightBundle($code: String!) { reportData { report(code: $code) { " + " ".join(parts) + " } } }"
 
 
@@ -696,9 +751,24 @@ def _fetch_bundle_batch(code: str, batch: list[dict], refreshed: int) -> dict:
     for f in batch:
         fid = f["id"]
         b = {alias: rep.get(f"{alias}_{fid}") for alias in BUNDLE_TABLES}
-        b["cinfo"] = ((rep.get(f"cinfo_{fid}") or {}).get("data") or []) if extras else []
+        complete = True
+        if extras:
+            first = rep.get(f"cinfo_{fid}")
+            try:
+                b["cinfo"] = _follow_pages(code, f, "cinfo", f"cinfo_{fid}", lambda s, _f=f: _cinfo_part(_f, s),
+                                           first, "FightBundle")
+            except WCLError as exc:
+                # Keep page 1, but do not cache the bundle so the next run re-fetches it.
+                # WCLRateLimited is not a WCLError and still propagates.
+                _warn_once("_cinfo_page_warning_shown",
+                           f"  (combatant info page 2+ unavailable - using page 1 only: {str(exc)[:160]})")
+                b["cinfo"] = list((first or {}).get("data") or [])
+                complete = False
+        else:
+            b["cinfo"] = []
         b["extras"] = extras
-        put_entry(_bundle_key(code, fid, extras), b)
+        if complete:
+            put_entry(_bundle_key(code, fid, extras), b)
         out[fid] = b
     return out
 
@@ -746,13 +816,37 @@ def deaths_from_table(table, fight: dict, actors: dict, lab: Labeller) -> list[d
     return deaths
 
 
-def player_tables_from_bundle(bundle: dict, actors: dict, lab: Labeller, participants: dict) -> tuple[list[dict], list[dict]]:
+def spec_ids_from_cinfo(events: list[dict], actors: dict, lab: Labeller, participants: dict) -> dict[str, int]:
+    """{player: specID} from the pull's CombatantInfo events (participants only). Unknown ids warn once per id."""
+    out: dict[str, int] = {}
+    for ev in events or []:
+        actor = actors.get(ev.get("sourceID"))
+        sid = ev.get("specID")
+        if not actor or not isinstance(sid, int) or sid <= 0:
+            continue
+        name = lab.actor_label(actor)
+        if name not in participants:
+            continue
+        out[name] = sid
+        if spec_of(sid) is None:
+            with _warn_lock:
+                if sid not in _unknown_spec_ids:
+                    _unknown_spec_ids.add(sid)
+                    print(f"  (unknown specID {sid} for {name} ({actor.get('class', '?')}) - add it to specs.py)")
+    return out
+
+
+def player_tables_from_bundle(bundle: dict, actors: dict, lab: Labeller, participants: dict,
+                              spec_ids: dict | None = None) -> tuple[list[dict], list[dict]]:
     """
     (damage_done, healing_done): one entry per player with {name, class, spec,
     total, active_seconds, ilvl}. Pets are folded into their owner by WCL, but
     some summoned guardians show up as their own source - so only names on the
-    pull's participant list are kept.
+    pull's participant list are kept. `spec` comes from the table icon; when the
+    icon carries no spec, the token for the player's CombatantInfo specID
+    (`spec_ids`, {player: specID}) is used instead.
     """
+    spec_ids = spec_ids or {}
     def convert(entries):
         out = []
         for e in entries:
@@ -765,6 +859,9 @@ def player_tables_from_bundle(bundle: dict, actors: dict, lab: Labeller, partici
             icon = e.get("icon") or ""
             # icons look like "Priest-Holy"; anything else (file names, pet icons) is not a spec
             spec = icon.split("-", 1)[1] if "-" in icon and icon.split("-", 1)[0] == e.get("type") else ""
+            if not spec:
+                known = spec_of(spec_ids.get(name))
+                spec = known[1] if known else ""
             out.append({
                 "name": name,
                 "class": e.get("type", "Unknown"),
@@ -772,10 +869,53 @@ def player_tables_from_bundle(bundle: dict, actors: dict, lab: Labeller, partici
                 "total": e.get("total") or 0,
                 "active_seconds": (e.get("activeTime") or 0) / 1000,
                 "ilvl": e.get("itemLevel") or 0,
+                "overheal": e.get("overheal") or 0,   # Healing table only (0 on damage rows)
             })
         return out
 
     return convert(_table_entries(bundle.get("damage"))), convert(_table_entries(bundle.get("healing")))
+
+
+def _gear_rows(items: list) -> list[list]:
+    """[[slot, item ilvl, enchant id or 0, gem count, item id], ...] sorted by slot; `slot` missing -> list index."""
+    rows = []
+    for idx, g in enumerate(items or []):
+        if not isinstance(g, dict):
+            continue
+        slot = g.get("slot")
+        if not isinstance(slot, int):
+            slot = idx
+        rows.append([slot, int(g.get("itemLevel") or 0), int(g.get("permanentEnchant") or 0),
+                     len(g.get("gems") or []), int(g.get("id") or 0)])
+    rows.sort(key=lambda r: r[0])
+    return rows
+
+
+def gear_from_bundle(bundle: dict, actors: dict, lab: Labeller, participants: dict) -> dict[str, list[list]]:
+    """
+    {label: [[slot, ilvl, enchant_id_or_0, n_gems, item_id], ...]} for every participant with gear in the bundle:
+    the DamageDone table row's `gear` (carries `slot`), else the Healing row's, else the CombatantInfo `gear`
+    (no `slot`; index = slot). Players without any gear are absent. Not emitted raw in the browser payload.
+    """
+    out: dict[str, list[list]] = {}
+    for table in ("damage", "healing"):
+        for e in _table_entries(bundle.get(table)):
+            if e.get("type") in (None, "Pet", "NPC") or not e.get("gear"):
+                continue
+            actor = actors.get(e.get("id"))
+            name = lab.actor_label(actor) if actor else e.get("name", "Unknown")
+            if name in participants and name not in out:
+                out[name] = _gear_rows(e["gear"])
+    for ev in bundle.get("cinfo") or []:
+        if not ev.get("gear"):
+            continue
+        actor = actors.get(ev.get("sourceID"))
+        if not actor:
+            continue
+        name = lab.actor_label(actor)
+        if name in participants and name not in out:
+            out[name] = _gear_rows(ev["gear"])
+    return out
 
 
 def counts_from_table(table, actors: dict, lab: Labeller, participants: dict) -> dict:
@@ -862,20 +1002,29 @@ def get_consumable_casts(code: str, fights: list[dict], ids: list[int], needs_re
         return out
     expr = "ability.id in (" + ",".join(str(i) for i in sorted(ids)) + ")"
 
+    variables = {"code": code, "filter": expr}
+    var_decl = "$code: String!, $filter: String"
+
+    def part(f, start_ms):
+        return (f"cons_{f['id']}: events(dataType: Casts, fightIDs: [{f['id']}], startTime: {int(start_ms)}, "
+                f"endTime: {int(f['endTime'])}, filterExpression: $filter, limit: 2000) {{ data nextPageTimestamp }}")
+
     def fetch(batch):
-        parts = [f"cons_{f['id']}: events(dataType: Casts, fightIDs: [{f['id']}], startTime: {int(f['startTime']) - PREPOT_BEFORE_MS}, "
-                 f"endTime: {int(f['endTime'])}, filterExpression: \"{expr}\", limit: 2000) {{ data }}" for f, _ in batch]
-        q = "query ConsumableCasts($code: String!) { reportData { report(code: $code) { " + " ".join(parts) + " } } }"
+        parts = [part(f, int(f["startTime"]) - PREPOT_BEFORE_MS) for f, _ in batch]
+        q = f"query ConsumableCasts({var_decl}) {{ reportData {{ report(code: $code) {{ " + " ".join(parts) + " } } }"
         try:
-            data = run_query(q, {"code": code})
+            data = run_query(q, variables)
+            count_api_call(1, sum(1 for _, r in batch if r))
+            rep = data["reportData"]["report"] or {}
+            pages = {f["id"]: _follow_pages(code, f, "consumables", f"cons_{f['id']}", lambda s, _f=f: part(_f, s),
+                                            rep.get(f"cons_{f['id']}"), "ConsumableCasts", var_decl, variables)
+                     for f, _ in batch}
         except WCLError as exc:
             _warn_once("_cons_warning_shown", f"  (potion / healthstone casts unavailable: {str(exc)[:160]})")
             return {}
-        count_api_call(1, sum(1 for _, r in batch if r))
-        rep = data["reportData"]["report"] or {}
         res = {}
         for f, _ in batch:
-            evs = (rep.get(f"cons_{f['id']}") or {}).get("data") or []
+            evs = pages[f["id"]]
             put_entry(_cons_key(code, f["id"], ids), {"data": evs})
             res[f["id"]] = evs
         return res
@@ -1068,27 +1217,41 @@ def get_first_death_casts(code: str, items: list[tuple[dict, dict, bool]], windo
     if not missing:
         return out
 
+    def window_of(fight, death):
+        end = fight["startTime"] + death["seconds_into_fight"] * 1000 + 300
+        return max(fight["startTime"], end - window * 1000 - 300), end
+
+    def part(kind, fight, death, start_ms):
+        dt, who = ("Casts", "sourceID") if kind == "casts" else ("Buffs", "targetID")
+        _, end = window_of(fight, death)
+        return (f"{kind}_{fight['id']}: events(dataType: {dt}, fightIDs: [{fight['id']}], {who}: {death['actor_id']}, "
+                f"startTime: {int(start_ms)}, endTime: {int(end)}, limit: 300) {{ data nextPageTimestamp }}")
+
     def fetch(batch):
         parts = []
         for fight, death, _ in batch:
-            end = fight["startTime"] + death["seconds_into_fight"] * 1000 + 300
-            start = max(fight["startTime"], end - window * 1000 - 300)
-            parts.append(f"casts_{fight['id']}: events(dataType: Casts, fightIDs: [{fight['id']}], sourceID: {death['actor_id']}, "
-                         f"startTime: {int(start)}, endTime: {int(end)}, limit: 300) {{ data }}")
-            parts.append(f"buffs_{fight['id']}: events(dataType: Buffs, fightIDs: [{fight['id']}], targetID: {death['actor_id']}, "
-                         f"startTime: {int(start)}, endTime: {int(end)}, limit: 300) {{ data }}")
+            start, _ = window_of(fight, death)
+            parts.append(part("casts", fight, death, start))
+            parts.append(part("buffs", fight, death, start))
         q = "query FirstDeathCasts($code: String!) { reportData { report(code: $code) { " + " ".join(parts) + " } } }"
         try:
             data = run_query(q, {"code": code})
+            count_api_call(1, sum(1 for _, _, r in batch if r))
+            rep = data["reportData"]["report"] or {}
+            pages = {}
+            for fight, death, _ in batch:
+                for kind in ("casts", "buffs"):
+                    alias = f"{kind}_{fight['id']}"
+                    pages[alias] = _follow_pages(code, fight, kind, alias,
+                                                 lambda s, _k=kind, _f=fight, _d=death: part(_k, _f, _d, s),
+                                                 rep.get(alias), "FirstDeathCasts")
         except WCLError as exc:
             _warn_once("_casts_warning_shown", f"  (casts before first death unavailable: {str(exc)[:160]})")
             return {}
-        count_api_call(1, sum(1 for _, _, r in batch if r))
-        rep = data["reportData"]["report"] or {}
         res = {}
         for fight, _, _ in batch:
-            evs = (rep.get(f"casts_{fight['id']}") or {}).get("data") or []
-            buffs = (rep.get(f"buffs_{fight['id']}") or {}).get("data") or []
+            evs = pages[f"casts_{fight['id']}"]
+            buffs = pages[f"buffs_{fight['id']}"]
             put_entry(_casts_key(code, fight["id"], window), {"data": evs, "buffs": buffs})
             res[fight["id"]] = {"casts": evs, "buffs": buffs}
         return res
@@ -1105,9 +1268,12 @@ def attach_casts(death: dict, casts: list[dict], buffs: list[dict], fight: dict,
     Adds `casts` (every cast by the dying player in the window, newest last),
     `defensives` (the ones that look like defensives) and `externals` (buffs
     applied to them by someone else in the window that look like defensives,
-    with the caster).
+    with the caster). The Buffs query is filtered by targetID but WCL also returns
+    events where the dying actor is only the source, so anything not targeting
+    death["actor_id"] is dropped here.
     """
     t = death["seconds_into_fight"]
+    actor_id = death.get("actor_id")
     rows = []
     for ev in casts:
         if ev.get("type") not in ("cast", "begincast"):
@@ -1123,7 +1289,7 @@ def attach_casts(death: dict, casts: list[dict], buffs: list[dict], fight: dict,
     for ev in buffs:
         if ev.get("type") not in ("applybuff", "refreshbuff", "applybuffstack"):
             continue
-        if ev.get("sourceID") == ev.get("targetID"):
+        if ev.get("targetID") != actor_id or ev.get("sourceID") == actor_id:
             continue
         name = ability_names.get(ev.get("abilityGameID"), f"Ability {ev.get('abilityGameID')}")
         if not is_defensive(name, patterns):
@@ -1192,6 +1358,13 @@ def get_damage_events(report_code: str, fight: dict, actors: dict, ability_names
                 "avoided": (ev.get("amount") or 0) == 0 and absorbed == 0
                            and not (ev.get("unmitigatedAmount") or 0),
                 "seconds": round((ev["timestamp"] - fight["startTime"]) / 1000, 2),
+                # auras on the target when the hit landed, WCL's dot-separated id string (None when WCL sent none);
+                # damage removed by armour / versatility / defensives; WCL hitType (1 hit, 2 crit, 7 dodge, 8 parry ...);
+                # blocked amount (None unless WCL sent it). Read by analysis.mitigation.digest_events.
+                "buffs": ev.get("buffs"),
+                "mitigated": ev.get("mitigated"),
+                "hit_type": ev.get("hitType"),
+                "blocked": ev.get("blocked"),
             })
         start = page.get("nextPageTimestamp")
     events.sort(key=lambda e: e["seconds"])
@@ -1273,13 +1446,15 @@ def aggregate_damage(events: list[dict]) -> list[dict]:
 
 def get_parses(report_code: str, fight: dict, lab: Labeller, refresh: bool = False) -> dict:
     """
-    {player: {"dps": rankPercent, "hps": rankPercent}} for a KILL. Wipes have
-    no rankings on WCL, so this returns {} for them without calling the API.
+    {player: {"dps": rankPercent, "hps": rankPercent, "bdps": bracketPercent, "bhps": bracketPercent,
+    "spec": spec}} for a KILL. Wipes have no rankings on WCL, so this returns {} for them without calling the API.
     """
     if not fight.get("kill"):
         return {}
     try:
         data = cq(RANKINGS_QUERY, {"code": report_code, "fightID": fight["id"]}, refresh=refresh)
+    except WCLRateLimited:
+        raise
     except Exception as exc:
         _warn_once("_rankings_warning_shown", f"  (rankings unavailable, parses will be blank: {exc})")
         return {}
@@ -1293,7 +1468,12 @@ def get_parses(report_code: str, fight: dict, lab: Labeller, refresh: bool = Fal
                     if ch.get("rankPercent") is None:
                         continue
                     server = ((ch.get("server") or {}).get("name")) or ""
-                    parses.setdefault(lab.label(ch["name"], server), {})[metric] = ch["rankPercent"]
+                    entry = parses.setdefault(lab.label(ch["name"], server), {})
+                    entry[metric] = ch["rankPercent"]
+                    if ch.get("bracketPercent") is not None:
+                        entry["b" + metric] = ch["bracketPercent"]   # percentile within the ilvl bracket
+                    if ch.get("spec") and not entry.get("spec"):
+                        entry["spec"] = ch["spec"]
     return parses
 
 
@@ -1400,6 +1580,7 @@ def collect(
     bosses: dict[tuple[str, str], list[dict]] = {}
     NIGHT_FIGHTS.clear()
     NIGHT_PLAYERS.clear()
+    TANK_BUFFS_SEEN.clear()
     lab = Labeller()
     excluded = excluded_bosses()
     if excluded:
@@ -1525,7 +1706,8 @@ def collect(
                 if deaths and fid in casts:
                     attach_casts(deaths[0], casts[fid]["casts"], casts[fid]["buffs"], fight, actors, lab, ability_names, def_patterns)
                 bundle = bundles[fid]
-                damage_done, healing_done = player_tables_from_bundle(bundle, actors, lab, participants)
+                spec_ids = spec_ids_from_cinfo(bundle.get("cinfo"), actors, lab, participants)
+                damage_done, healing_done = player_tables_from_bundle(bundle, actors, lab, participants, spec_ids)
                 consumables = consumables_from_cinfo(bundle.get("cinfo"), actors, lab, participants, ability_names, cons_patterns)
                 prepotted, potions = consumable_use(cons_casts.get(fid), actors, lab, participants, id_cats, fight["startTime"])
                 if fid in cons_casts:
@@ -1542,6 +1724,19 @@ def collect(
                 pull_dt = datetime.fromtimestamp(absolute_start_ms / 1000, tz=tz)
                 boss_pct = 0.0 if fight.get("kill") else (fight.get("bossPercentage") or 0.0)
                 fight_pct = 0.0 if fight.get("kill") else (fight.get("fightPercentage") if fight.get("fightPercentage") is not None else boss_pct)
+                duration_s = round((fight["endTime"] - fight["startTime"]) / 1000, 1)
+                # seconds into the pull at which WCL marks the wipe call (None if never called / kill)
+                wipe_called_s = (round((fight["wipeCalledTime"] - fight["startTime"]) / 1000, 1)
+                                 if fight.get("wipeCalledTime") is not None else None)
+                # post-wipe cutoff: WCL's wipe call when present, else the death-cascade heuristic (analysis/wipe.py)
+                wipe_cutoff = wipe_cutoff_s(fight.get("kill"), duration_s, [d["seconds_into_fight"] for d in deaths], wipe_called_s)
+                # roles for the event digest: CombatantInfo specID first, table spec token as the fallback (Contract D)
+                digest_specs = dict(spec_ids)
+                for row in damage_done + healing_done:
+                    if row["name"] not in digest_specs and row.get("spec"):
+                        digest_specs[row["name"]] = row["spec"]
+                player_events = digest_events(events, participants, digest_specs, wipe_cutoff)
+                gear = gear_from_bundle(bundle, actors, lab, participants)
 
                 pull = {
                     "report_code": code,
@@ -1557,10 +1752,16 @@ def collect(
                     # (WCL's fightPercentage: accounts for phases / council bosses)
                     "boss_percentage": boss_pct,
                     "fight_percentage": fight_pct,
-                    "duration_seconds": round((fight["endTime"] - fight["startTime"]) / 1000, 1),
+                    "duration_seconds": duration_s,
+                    "wipe_called_s": wipe_called_s,
+                    # the three keys below are NOT emitted raw by dash/payload.py (the metric vector is built from them)
+                    "wipe_cutoff_s": wipe_cutoff,          # float seconds (deaths/hits <= this count) or None
+                    "player_events": player_events,        # {label: {dtk, hits, hits_buffs, dodge_parry_miss[, am_up, amw_num, amw_den, mit_num, mit_den]}}
+                    "gear": gear,                          # {label: [[slot, ilvl, enchant_id_or_0, n_gems, item_id], ...]}
                     "absolute_start_ms": absolute_start_ms,
                     "pull_time": pull_dt.strftime("%H:%M"),
                     "participants": participants,  # label -> class
+                    "spec_ids": spec_ids,          # label -> WCL specID from CombatantInfo ({} without extras); not in the browser payload
                     "phase": phase_at_end(fight, phase_names, transitions),
                     "phase_timeline": phase_timeline(fight, phase_names, transitions),
                     "deaths": deaths,
@@ -1589,6 +1790,7 @@ def collect(
         _refresh_current = False
 
     print(cache.summary())
+    print(rate_summary())
     if cache.stats["api_calls"] == 0:
         print("Nothing new on WCL since last run - everything came from cache.")
 

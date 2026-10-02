@@ -10,6 +10,7 @@ from collect_data import NIGHT_FIGHTS, NIGHT_PLAYERS, normalize
 from .common import (esc, empty_state, fmt_duration, kpis, section_note, table, gotab, fig_html, median, avoidable_set, player_roles,
                      all_pulls, filter_bosses_by_type, regulars, player_stats, boss_status, night_stats, MPLUS_FILE,
                      LINE_DASHES, MARKERS)
+from .rollups import prep_rates, nights_in_order
 
 SEVERITY_LABEL = {"warn": "Watch", "good": "Good", "info": "Note"}
 CHECK_SVG = ("<svg width='14' height='14' viewBox='0 0 16 16' aria-hidden='true'><path d='M2 8.5l4 4 8-9' fill='none' "
@@ -213,6 +214,22 @@ def insights(bosses: dict, ordered: list, avoidable_cfg: dict, mode: str = "anon
     elif any(pulls for _, pulls in ordered):
         out.append(("good", "Full clear", "Every boss in the selection has been killed. Farm kill times are on the Raid tab.", None))
 
+    # --- preparation across every boss: rates only, never names (public builds included)
+    prep_nights = [(n, prep_rates([p for p in pulls_all if p["night"] == n])) for n in nights_in_order(pulls_all)]
+    prep_nights = [(n, r) for n, r in prep_nights if r]
+    if prep_nights:
+        night, cur = prep_nights[-1]
+        prev = prep_nights[-2][1] if len(prep_nights) > 1 else None
+        txt = (f"{cur['ff'] * 100:.0f}% of {cur['n']} player-pulls on {esc(night)} started with flask and food"
+               + (f", {cur['rune'] * 100:.0f}% with a rune" if cur["rune"] is not None else "") + ".")
+        if prev:
+            d = (cur["ff"] - prev["ff"]) * 100
+            txt += (f" Previous night {prev['ff'] * 100:.0f}%"
+                    + (" - better." if d >= 1 else " - worse." if d <= -1 else " - about the same."))
+        sev = "good" if cur["ff"] >= 0.95 else "warn" if cur["ff"] < 0.8 else "info"
+        out.append((sev, f"Preparation: {cur['ff'] * 100:.0f}% flask and food", txt
+                    + " Counted at pull start over every boss pull; the Players tab has the team numbers.", "tabPlayers"))
+
     # --- last night: efficiency
     nights: dict[str, list[dict]] = defaultdict(list)
     for p in pulls_all:
@@ -368,6 +385,7 @@ def home_section(bosses: dict, ordered: list, avoidable_cfg: dict, mode: str, he
                   ("Players seen", str(players))], raw=True)
     items = insights(bosses, ordered, avoidable_cfg, mode)
     tab_label = {f"tab{i}": name for i, ((name, _diff), _) in enumerate(ordered)}
+    tab_label["tabPlayers"] = "Players"
     ins = "".join(
         f"<article class='insight {sev}'><h4><span class='badge'>{SEVERITY_LABEL.get(sev, sev)}</span>{title}</h4><p>{text}</p>"
         + (gotab(tab, f"Open {esc(tab_label.get(tab, ''))} &rarr;", cls="jump") if tab else "") + "</article>"

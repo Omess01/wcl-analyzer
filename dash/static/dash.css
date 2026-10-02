@@ -298,6 +298,48 @@ h2.panel-title .sub { font-size:var(--fs-sm); font-weight:400; margin-top:var(--
   .pull-grid { grid-template-columns:repeat(auto-fill, minmax(104px, 1fr)); }
 }
 
+/* player card components (dash.js card components block): status = class + glyph + word, colour supplementary */
+.card { background:var(--surface-card); border:1px solid var(--border); border-radius:var(--radius); padding:var(--sp-4); margin:0 0 var(--sp-5); min-width:0; }
+.card .kpis { grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); }
+.card .kpi dd .spark { display:block; margin-top:var(--sp-2); max-width:100%; height:auto; }
+.status-good, .status-watch, .status-note { font-weight:600; white-space:nowrap; }
+.status-good { color:var(--good); } .status-watch { color:var(--warn); } .status-note { color:var(--series-1); }
+.bullet { margin:var(--sp-2) 0 var(--sp-3); max-width:520px; }
+.bullet-track { position:relative; height:16px; background:var(--surface-raised); border-radius:3px; }
+.bullet-fill { position:absolute; left:0; top:4px; bottom:4px; background:var(--series-1); border-radius:2px; }
+.bullet-tick { position:absolute; top:0; bottom:0; width:0; margin-left:-1px; border-left:2px solid var(--ink); }
+.bullet-tick.own { border-left-style:dashed; border-left-color:var(--accent); top:-4px; bottom:-4px; }
+.bullet-legend { display:flex; flex-wrap:wrap; gap:var(--sp-1) var(--sp-4); list-style:none; margin:var(--sp-2) 0 0; padding:0; font-size:var(--fs-sm); color:var(--ink-dim); }
+.bullet-legend strong { color:var(--ink); font-weight:600; }
+.bullet-legend .key { display:inline-block; vertical-align:middle; margin-right:var(--sp-1); }
+.bullet-legend .key.fill { width:14px; height:8px; background:var(--series-1); border-radius:2px; }
+.bullet-legend .key.target { width:0; height:14px; border-left:2px solid var(--ink); }
+.bullet-legend .key.own { width:0; height:14px; border-left:2px dashed var(--accent); }
+.boxrow { display:flex; flex-wrap:wrap; gap:var(--sp-2); margin:var(--sp-2) 0 var(--sp-3); }
+.boxrow .box { display:inline-flex; align-items:center; gap:var(--sp-1); min-width:44px; min-height:44px; padding:0 var(--sp-2); background:var(--surface-raised); color:var(--ink); border:1px solid var(--border-control); border-left-width:4px; border-radius:6px; font:inherit; font-size:var(--fs-sm); cursor:pointer; }
+.boxrow .box:hover { border-color:var(--ink-dim); }
+.boxrow .box:focus-visible { outline:none; box-shadow:var(--ring); }
+.boxrow .box .glyph { font-weight:700; min-width:1ch; text-align:center; }
+.boxrow .box.lvl-good { border-left-color:var(--good); } .boxrow .box.lvl-good .glyph { color:var(--good); }
+.boxrow .box.lvl-watch { border-left-color:var(--warn); } .boxrow .box.lvl-watch .glyph { color:var(--warn); }
+.boxrow .box.lvl-note { border-left-color:var(--series-1); } .boxrow .box.lvl-note .glyph { color:var(--series-1); }
+.multiples { display:grid; gap:var(--sp-3); grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); margin:0 0 var(--sp-5); }
+.multiples .multiple { margin:0; background:var(--surface-raised); border:1px solid var(--border); border-radius:8px; padding:var(--sp-2); min-width:0; }
+.multiples .multiple svg { display:block; width:100%; height:auto; }
+.multiples .multiple figcaption { margin-top:var(--sp-1); font-size:var(--fs-sm); color:var(--ink); }
+.multiples .multiple figcaption .vs { display:inline; margin:0 0 0 var(--sp-2); }
+.multiples-skip { margin:0; color:var(--ink-dim); font-size:var(--fs-sm); align-self:center; }
+.uptime { display:flex; align-items:center; gap:var(--sp-2); margin:var(--sp-1) 0; font-size:var(--fs-sm); }
+.uptime-bar { display:inline-block; flex:none; width:120px; height:8px; background:var(--surface-raised); border-radius:4px; overflow:hidden; }
+.uptime-bar > i { display:block; height:100%; background:var(--series-1); }
+@media (max-width:700px) {
+  .card { padding:var(--sp-3); }
+  .card .kpis { grid-template-columns:1fr 1fr; }
+  .multiples { grid-template-columns:repeat(auto-fill, minmax(120px, 1fr)); }
+  .prep-rows li { grid-template-columns:1fr; gap:var(--sp-1); }
+  .prep-count { white-space:normal; }
+}
+
 /* charts (SVG progression + Plotly wrappers) */
 figure.chart { margin:0 0 var(--sp-5); background:var(--surface-card); border:1px solid var(--border); border-radius:var(--radius); padding:var(--sp-4); min-width:0; }
 .chart-head { display:flex; flex-wrap:wrap; gap:var(--sp-3); align-items:baseline; justify-content:space-between; margin-bottom:var(--sp-3); }
@@ -327,3 +369,19 @@ svg.plot .hit { fill:transparent; cursor:pointer; }
 .tip dt { color:var(--ink-dim); font-size:var(--fs-micro); } .tip dd { margin:0; font-size:var(--fs-micro); }
 figcaption { color:var(--ink-dim); font-size:var(--fs-sm); margin-top:var(--sp-3); max-width:90ch; }
 details.table-view > summary { cursor:pointer; color:var(--ink-dim); font-size:var(--fs-sm); font-weight:500; min-height:44px; display:flex; align-items:center; }
+/* player card (Players tab under the Player filter): layout only; colours come from tokens via the shared classes */
+.player-card > h3 { margin:var(--sp-5) 0 var(--sp-2); font-size:var(--fs-md); }
+.player-card .card-counts { display:flex; flex-wrap:wrap; align-items:baseline; gap:var(--sp-1) var(--sp-2); margin:0 0 var(--sp-3); font-size:var(--fs-sm); }
+.player-card .insight { margin:0 0 var(--sp-3); }
+.insight h3 { display:flex; align-items:flex-start; gap:var(--sp-2); margin:0 0 var(--sp-2); font-size:var(--fs-base); }
+.card-items { list-style:none; margin:0 0 var(--sp-3); padding:0; display:grid; gap:var(--sp-2); font-size:var(--fs-sm); }
+.card-items .vs { display:inline; margin:0 0 0 var(--sp-1); }
+.card-notes { margin:0 0 var(--sp-3); }
+.card-notes > summary { cursor:pointer; color:var(--ink-dim); font-size:var(--fs-sm); min-height:24px; }
+.card-notes .card-items { margin-top:var(--sp-2); }
+.card-line { margin:var(--sp-1) 0 var(--sp-3); font-size:var(--fs-sm); }
+.prep-rows { list-style:none; margin:0 0 var(--sp-3); padding:0; display:grid; gap:var(--sp-2); font-size:var(--fs-sm); }
+.prep-rows li { display:grid; grid-template-columns:minmax(9rem, max-content) 1fr max-content; gap:var(--sp-3); align-items:baseline; }
+.prep-glyphs { letter-spacing:2px; overflow-wrap:anywhere; min-width:0; }
+.prep-count { color:var(--ink-dim); white-space:nowrap; }
+.card-gear { list-style:none; margin:0 0 var(--sp-3); padding:0; font-size:var(--fs-sm); display:grid; gap:var(--sp-1); }

@@ -11,7 +11,8 @@ from types import SimpleNamespace
 import pytest
 
 from dash.page import build_html, static_file
-from dash.payload import pull_payload
+from dash.payload import pull_payload, _encode
+from analysis.player_metrics import PM_COLS
 
 
 def _args(**kw):
@@ -30,6 +31,39 @@ def _payloads(html: str) -> dict:
         else:
             out[tab] = json.loads(gzip.decompress(base64.b64decode(text)).decode("utf-8"))
     return out
+
+
+def _players_block(html: str):
+    """(mime, inflated Contract E dict) of the Players-tab data script, or None when absent."""
+    m = re.search(r"<script type='(application/[a-z+0-9]+)' id='data_tabPlayers'>(.*?)</script>", html, flags=re.S)
+    if not m:
+        return None
+    mime, text = m.groups()
+    if mime == "application/json":
+        return mime, json.loads(text.replace("<\\/", "</"))
+    return mime, json.loads(gzip.decompress(base64.b64decode(text)).decode("utf-8"))
+
+
+def _script_text(html: str, script_id: str) -> str:
+    return re.search(rf"<script type='[^']+' id='{script_id}'>(.*?)</script>", html, flags=re.S).group(1)
+
+
+def _pre_phase1(data: dict) -> dict:
+    """The boss payload with every Phase 1 addition stripped (pm/pmcols/wc/av, recap AM flag, dd/hd ilvl, parse bracket/spec)."""
+    d = json.loads(json.dumps(data))
+    d.pop("pmcols", None)
+    for p in d["pulls"]:
+        p.pop("pm", None)
+        p.pop("wc", None)
+        for de in p["deaths"]:
+            de.pop("av", None)
+            de["recap"] = [r[:5] for r in de["recap"]]
+        p["dd"] = [r[:5] for r in p["dd"]]
+        p["hd"] = [r[:5] for r in p["hd"]]
+        for pr in p["parses"].values():
+            for k in ("bdps", "bhps", "spec"):
+                pr.pop(k, None)
+    return d
 
 
 def test_payload_roundtrip_compressed_and_plain(bosses):
@@ -53,6 +87,97 @@ def test_payload_roundtrip_compressed_and_plain(bosses):
     if phased:
         row = next(r for r in phased[0]["dt"] if len(r) >= 6)
         assert sum(row[5]) == row[2]
+
+
+def test_payload_phase1_keys(bosses):
+    import specs
+    tanks = set(specs.role_sets()["tanks"])
+    seen_tank_death = False
+    wc_by_fid = {}
+    for (name, diff), pulls in bosses.items():
+        _mime, text = pull_payload(pulls, name, diff, {}, compress=False)
+        data = json.loads(text.replace("<\\/", "</"))
+        assert data["pmcols"] == PM_COLS
+        for p in data["pulls"]:
+            assert "wc" in p and "kc" not in p
+            wc_by_fid[p["fid"]] = p["wc"]
+            assert set(p["pm"]) == set(p["parts"])
+            for vec in p["pm"].values():
+                assert len(vec) <= len(PM_COLS) == 23
+                assert all(v is None or (isinstance(v, int) and not isinstance(v, bool)) for v in vec)
+                assert not vec or vec[-1] is not None   # trimmed
+            assert p["dd"] and all(len(r) == 6 for r in p["dd"]) and all(len(r) == 6 for r in p["hd"])
+            assert all(isinstance(r[5], int) for r in p["dd"])
+            for de in p["deaths"]:
+                assert de["av"] in (0, 1)
+                if p["specs"].get(de["pl"]) in tanks:
+                    seen_tank_death = True
+                    assert de["recap"] and all(len(r) == 6 and r[5] in (0, 1, None) for r in de["recap"])
+                else:
+                    assert all(len(r) == 5 for r in de["recap"])
+    assert wc_by_fid[8] == 92.5 and wc_by_fid[2] is None and wc_by_fid[9] is None
+    assert seen_tank_death, "fixture has no tank death to check the recap AM flag on"
+
+
+def test_death_av_flag_and_tank_recap_flag():
+    from dash.payload import _death_payload
+    ev = lambda ab, amt, buffs=None: {"seconds": 9.0, "ability": ab, "source": "Boss", "amount": amt, "self": False, "buffs": buffs}
+    d = {"player": "T", "class": "DemonHunter", "seconds_into_fight": 10.0, "ability": "Melee", "window_damage": 100,
+         "recap": [ev("Swirl", 60, "203819."), ev("Melee", 40, "1.")]}
+    assert _death_payload(d, False, {"swirl"})["av"] == 1                  # >= 50 % of the window from avoidable
+    assert _death_payload(d, False, {"melee"})["av"] == 1                  # killing blow avoidable
+    assert _death_payload(d, False, {"other"})["av"] == 0
+    assert _death_payload(d, False, set())["av"] == 0
+    d["recap"][1]["buffs"] = None
+    rows = _death_payload(d, False, set(), "Vengeance")["recap"]
+    assert [r[5] for r in rows] == [1, None]
+    assert all(len(r) == 5 for r in _death_payload(d, False, set())["recap"])
+
+
+def test_players_payload_block(bosses):
+    html = build_html(bosses, _args())
+    mime, data = _players_block(html)
+    assert mime == "application/gzip+base64"
+    assert set(data) == {"cols", "roster", "nights", "sev", "gear", "advice", "named"}
+    assert data["cols"] == PM_COLS and data["named"] is False
+    assert html.index("id='data_tabPlayers'") < html.index("id='static_tabPlayers'")
+    nights = [n[0] for n in data["nights"]]
+    assert len(nights) == 1
+    participants = {lab for pulls in bosses.values() for p in pulls for lab in p["participants"]}
+    assert set(data["roster"]) == participants
+    for lab, r in data["roster"].items():
+        assert set(r) == {"cl", "spec", "role", "pulls", "support"} and r["role"] in ("tank", "healer", "dps")
+        assert nights[0] in data["sev"][lab], lab
+    dd_players = {e["name"] for pulls in bosses.values() for p in pulls for e in p.get("damage_done") or []}
+    for lab in dd_players:
+        g = data["gear"][lab]
+        assert isinstance(g["ilvl"], int) and g["ilvl_min"] <= g["ilvl"] <= g["ilvl_max"]
+        assert isinstance(g["gaps"], list)
+    assert sorted(r["role"] for r in data["roster"].values()).count("tank") == 2
+    # size guards
+    players_b64 = len(_script_text(html, "data_tabPlayers"))
+    n_pulls = sum(len(p) for p in bosses.values())
+    boss = _payloads(html)
+    after = sum(len(_script_text(html, f"data_{t}")) for t in boss)
+    before = sum(len(_encode(_pre_phase1(d), True)[1]) for d in boss.values())
+    # `pmcols` is a per-boss-tab constant (~105 B base64 each); on the 4-pull / 3-tab fixture it would count as ~80 B
+    # per pull, on real builds (10-40 pulls per boss) ~3-10 B. The per-pull guard therefore excludes it.
+    no_cols = sum(len(_encode({k: v for k, v in d.items() if k != "pmcols"}, True)[1]) for d in boss.values())
+    print(f"\nfixture boss payloads base64: before {before} B ({before / n_pulls:.0f}/pull), "
+          f"after {after} B ({after / n_pulls:.0f}/pull), after without pmcols {no_cols} B ({no_cols / n_pulls:.0f}/pull); "
+          f"Players block {players_b64} B base64")
+    assert (no_cols - before) / n_pulls <= 800
+    assert (after - before) / n_pulls <= 850
+    assert players_b64 <= 25_000
+
+
+def test_players_payload_named_and_uncompressed(bosses):
+    html = build_html(bosses, _args(callouts="named", uncompressed=True))
+    mime, data = _players_block(html)
+    assert mime == "application/json" and data["named"] is True
+    assert "</script" not in _script_text(html, "data_tabPlayers").replace("<\\/", "")
+    assert json.loads(_script_text(html, "cfg"))["named"] is True
+    assert json.loads(_script_text(build_html(bosses, _args()), "cfg"))["named"] is False
 
 
 def test_build_html_structure(bosses, tmp_path):
@@ -531,7 +656,7 @@ def test_chart_skip_rule():
 def test_no_raw_colours_outside_tokens():
     js = static_file("dash.js")
     assert not re.findall(r"#[0-9a-fA-F]{6}\b", js), "hex colours belong in tokens.css"
-    for name in ("home.py", "raid.py", "players.py", "mplus_tab.py", "payload.py", "page.py"):
+    for name in ("home.py", "raid.py", "players.py", "mplus_tab.py", "payload.py", "page.py", "rollups.py"):
         with open(os.path.join(os.path.dirname(__file__), "..", "dash", name), encoding="utf-8") as f:
             src = f.read()
         assert not re.findall(r"#[0-9a-fA-F]{6}\b", src), name
@@ -1198,3 +1323,144 @@ def test_who_pulled_wired_into_boss_and_players_tab():
     assert "table.pull-matrix th:first-child, table.pull-matrix td:first-child { position:sticky; left:0;" in css
     assert "table.pull-matrix th, table.pull-matrix td { padding-left:var(--sp-1); padding-right:var(--sp-2); }" in css   # 16 columns fit 1440 px
     assert "tbl(pullerMatrixHeads(m.cols)" in js and "N / H / M = Normal / Heroic / Mythic" in js
+
+
+def test_role_config_script_feeds_dash_js(bosses):
+    import specs
+    page = build_html(bosses, _args())
+    m = re.search(r"<script type='application/json' id='cfg'>(.*?)</script>", page, re.S)
+    assert m, "cfg script missing"
+    assert json.loads(m.group(1)) == {**specs.role_sets(), "named": False}
+    js = static_file("dash.js")
+    assert "getElementById('cfg')" in js
+    assert not re.search(r"new Set\(\[\s*'(Protection|Holy|Blood)'", js)
+
+
+# ---------------- T5: player card components ----------------
+
+def _card_components(quickjs):
+    """Evaluate the card components from dash.js in quickjs (no DOM): stubbed TOK + the table helpers block (escH) +
+    the card block. They must sit between the two card marker comments."""
+    src = static_file("dash.js")
+    t0, t1 = src.index("// --- table helpers (quickjs-testable) ---"), src.index("// --- end table helpers ---")
+    c0, c1 = src.index("// --- card components (quickjs-testable) ---"), src.index("// --- end card components ---")
+    ctx = quickjs.Context()
+    ctx.eval("var TOK = { ink: 'INK', inkDim: 'INKDIM', border: 'BORDER', borderStrong: 'BSTRONG', borderControl: 'BCTRL', accent: 'ACCENT', "
+             "good: 'GOOD', warn: 'WARN', bad: 'BAD', series: ['S1', 'S2', 'S3', 'S4', 'S5', 'S6'] };\n" + src[t0:t1] + "\n" + src[c0:c1])
+    return ctx
+
+
+def test_card_block_follows_chart_helpers_and_uses_tokens():
+    src = static_file("dash.js")
+    end_chart = src.index("// --- end pure chart helpers ---")
+    start = src.index("// --- card components (quickjs-testable) ---")
+    assert end_chart < start < src.index("// --- end card components ---")
+    assert src[end_chart:start].count("\n") == 1, "card block sits right after the chart helpers"
+    block = src[start:src.index("// --- end card components ---")]
+    assert "document" not in block and "window" not in block and "$(" not in block
+    assert not re.findall(r"(?<!&)#[0-9a-fA-F]{3,8}\b", block) and "rgb(" not in block
+
+
+def test_sparkline_needs_four_values_and_has_title():
+    quickjs = pytest.importorskip("quickjs")
+    ctx = _card_components(quickjs)
+    assert ctx.eval("sparkline([1, 2, 3])") == ""
+    assert ctx.eval("sparkline([1, null, 2, 'x', 3])") == ""
+    assert ctx.eval("sparkline(null)") == ""
+    svg = ctx.eval("sparkline([3, 1, 4, 1.5], { label: 'Deaths per pull' })")
+    assert svg.startswith("<svg class='spark'") and "<title>Deaths per pull: 4 nights, from 3 to 1.5" in svg
+    assert "role='img'" in svg and "aria-label='Deaths per pull" in svg
+    assert "stroke='S1'" in svg and "<circle" in svg and "undefined" not in svg and "NaN" not in svg
+    assert "width='96' height='28'" in svg
+    assert "width='120' height='30'" in ctx.eval("sparkline([2, 2, 2, 2], { w: 120, h: 30 })")
+    assert "NaN" not in ctx.eval("sparkline([2, 2, 2, 2])")
+
+
+def test_bullet_bar_labels_every_tick_with_text():
+    quickjs = pytest.importorskip("quickjs")
+    ctx = _card_components(quickjs)
+    html = ctx.eval("bulletBar(120, 140, 110, 200, { name: 'Active DPS', fmt: v => v + 'k' })")
+    assert html.count("class='bullet-tick") == 2 and "bullet-tick target" in html and "bullet-tick own" in html
+    for text in ("Active DPS: <strong>120k</strong>", "role median: <strong>140k</strong>", "your median: <strong>110k</strong>"):
+        assert text in html, text
+    assert "width:60.0%" in html and "left:70.0%" in html and "left:55.0%" in html
+    assert "class='bullet-track' aria-hidden='true'" in html
+    # a missing tick drops both the mark and its legend entry; no max -> scaled to the largest value
+    one = ctx.eval("bulletBar(50, null, 40, null, { name: 'Overheal', target: 'healer band', fmt: v => v + '%' })")
+    assert "bullet-tick target" not in one and "healer band" not in one and "your median: <strong>40%</strong>" in one
+    assert "undefined" not in one and "NaN" not in one
+    assert ctx.eval("bulletBar(null, 1, 1, 2, {})") == ""
+
+
+def test_box_row_glyph_and_sr_word_per_level():
+    quickjs = pytest.importorskip("quickjs")
+    ctx = _card_components(quickjs)
+    html = ctx.eval("boxRow([{level: 'good', text: 'Pull 1'}, {level: 'watch', title: 'First death <b>', attrs: {'data-pull': 7, onclick: 'x'}}, {level: 'note'}, {level: 'bogus'}])")
+    assert html.startswith("<div class='boxrow'>")
+    boxes = re.findall(r"<button type='button' class='box lvl-(\w+)' title='([^']*)'[^>]*>(.*?)</button>", html)
+    assert [b[0] for b in boxes] == ["good", "watch", "note", "note"]
+    for (lvl, _tip, inner), (glyph, word) in zip(boxes, [("&#10003;", "Good"), ("!", "Watch"), ("&#8226;", "Note"), ("&#8226;", "Note")]):
+        assert f"<span class='glyph' aria-hidden='true'>{glyph}</span><span class='sr-only'>{word}</span>" in inner, lvl
+    assert boxes[0][1] == "Good: Pull 1" and "<span class='box-text'>Pull 1</span>" in boxes[0][2]
+    assert boxes[1][1] == "First death &lt;b&gt;" and "data-pull='7'" in html and "onclick" not in html
+    assert ctx.eval("boxRow([])") == "" and ctx.eval("boxRow(null)") == ""
+    assert ctx.eval("statusText('watch')") == "<span class='status-watch'><span aria-hidden='true'>!</span> Watch</span>"
+
+
+def test_small_multiples_skip_rule_and_marks():
+    quickjs = pytest.importorskip("quickjs")
+    ctx = _card_components(quickjs)
+    html = ctx.eval("""smallMultiples([
+        {boss: "Ula'tek (Heroic)", label: 'active DPS', pulls: [{v: 100, i: 1}, {v: 120, i: 2}, {v: 90, i: 3}, {v: 130, i: 4, k: true}], band: [95, 125]},
+        {boss: 'Nek', pulls: [{v: 1}, {v: 2}, {v: null}, {v: 3}]},
+        {boss: 'One', pulls: [{v: 5}]}])""")
+    assert html.startswith("<div class='multiples'>")
+    assert html.count("<figure class='multiple'>") == 1
+    assert "<p class='multiples-skip'>Nek: 3 pulls - too few to judge consistency (needs 4).</p>" in html
+    assert "<p class='multiples-skip'>One: 1 pull - too few" in html
+    fig = html[html.index("<figure"):html.index("</figure>")]
+    assert "Ula&#39;tek (Heroic), active DPS: 4 pulls, median 110, range 90 to 130, reference band 95 to 125, 1 kill (diamond)" in fig
+    assert "<title>" in fig and fig.count("<circle") == 3 and "rotate(45" in fig and "fill='ACCENT'" in fig
+    assert "class='median'" in fig and "class='band'" in fig and "fill='BSTRONG'" in fig
+    assert "undefined" not in html and "NaN" not in html
+    # explicit own median wins; no band -> no band rect
+    own = ctx.eval("smallMultiples([{boss: 'B', own: 7, pulls: [{v: 1}, {v: 2}, {v: 3}, {v: 4}]}])")
+    assert "median 7," in own and "class='band'" not in own
+    assert ctx.eval("smallMultiples([])") == ""
+
+
+def test_delta_text_mirrors_python_delta():
+    quickjs = pytest.importorskip("quickjs")
+    from dash.home import _delta
+    ctx = _card_components(quickjs)
+    py_fmt = lambda x: f"{x:.1f}"
+    js_fmt = "x => x.toFixed(1)"
+    for cur, prev, lower in [(12, 10, False), (8, 10, False), (8, 10, True), (12, 10, True), (5, 5, False), (3, None, False), (0.3, 1.5, True)]:
+        js_prev = "null" if prev is None else repr(prev)
+        js = ctx.eval(f"deltaText({cur}, {js_prev}, {js_fmt}, {'true' if lower else 'false'})")
+        assert js == _delta(cur, prev, py_fmt, lower), (cur, prev, lower, js)
+    worse = ctx.eval("deltaText(2, 1, x => x.toFixed(1), true, 'earlier nights')")
+    assert worse == "<span class='vs delta worse'>&#9650; +1.0 vs earlier nights (1.0) - worse</span>"
+    better = ctx.eval("deltaText(1, 2, x => x.toFixed(1), true, 'earlier nights')")
+    assert better.startswith("<span class='vs delta better'>&#9660; -1.0 vs earlier nights")
+    assert ctx.eval("deltaText(1, 1, null, false, 'earlier nights')") == "<span class='vs'>same as earlier nights</span>"
+    assert "undefined" not in ctx.eval("deltaText(1, undefined, null, false)")
+
+
+def test_uptime_bar_writes_the_value():
+    quickjs = pytest.importorskip("quickjs")
+    ctx = _card_components(quickjs)
+    html = ctx.eval("uptimeBar(62.4)")
+    assert "width:62.4%" in html and "<span class='uptime-text'>62%</span>" in html and "aria-hidden='true'" in html
+    assert "Demon Spikes up on 62% of hits" in ctx.eval("uptimeBar(62.4, 'Demon Spikes up on 62% of hits')")
+    assert "width:100.0%" in ctx.eval("uptimeBar(140)")
+    assert ctx.eval("uptimeBar(null, 'aura data incomplete')") == "<div class='uptime'><span class='uptime-text'>aura data incomplete</span></div>"
+
+
+def test_card_css_classes_present():
+    css = static_file("dash.css")
+    for sel in (".card {", ".card .kpi dd .spark", ".bullet {", ".boxrow .box {", ".boxrow .box.lvl-good", ".boxrow .box.lvl-watch",
+                ".boxrow .box.lvl-note", ".multiples {", ".status-good", ".status-watch", ".status-note", ".uptime-bar"):
+        assert sel in css, sel
+    narrow = css[css.rindex("@media (max-width:700px)"):]
+    assert ".card .kpis { grid-template-columns:1fr 1fr; }" in narrow and "minmax(120px, 1fr)" in narrow

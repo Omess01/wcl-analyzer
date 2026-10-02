@@ -29,6 +29,8 @@ except ImportError as exc:
     )
 
 from collect_data import collect, default_difficulties
+from wcl_client import WCLRateLimited, RATE_QUERY, RATE_REFRESH_MAX_FRACTION
+import wcl_client
 from path import DATA_DIR, DASHBOARD_DIR
 from dash.page import build_html
 from dash.mplus_tab import update_mplus_if_stale
@@ -56,8 +58,60 @@ def write_abilities_seen(bosses: dict) -> str:
     return path
 
 
+def write_tank_buffs_seen() -> str | None:
+    """
+    data/tank_buffs_seen.json = {spec label: {buff id: connected hits it was up on}} (top 25 per tank spec in this build)
+    - the input for verifying the ids in config/tank_mitigation.json. Not written (None) when no tank hit carried aura data.
+    """
+    from analysis.mitigation import TANK_BUFFS_SEEN
+    if not TANK_BUFFS_SEEN:
+        return None
+    out = {spec: {str(bid): n for bid, n in counter.most_common(25)} for spec, counter in sorted(TANK_BUFFS_SEEN.items())}
+    path = os.path.join(DATA_DIR, "tank_buffs_seen.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2, ensure_ascii=False)
+    return path
+
+
+def tank_mitigation_warnings() -> list[str]:
+    """Unknown spec keys in tank_mitigation.json, and configured ids never seen on that spec's tanks in this build."""
+    import specs
+    from analysis.mitigation import load_tank_mitigation, spec_label, mitigation_entry, TANK_BUFFS_SEEN, TANK_MITIGATION_FILE
+    fname = os.path.basename(TANK_MITIGATION_FILE)
+    cfg = load_tank_mitigation()
+    if not cfg:
+        return []
+    labels = {}
+    for cls, token, role, _simc, _sup in specs.SPECS.values():
+        if role == "tank":
+            labels[spec_label(cls, token)] = (cls, token)
+    resolved = {}
+    for label, (cls, token) in labels.items():
+        entry = mitigation_entry(token, cls)
+        if entry is not None:
+            for key, val in cfg.items():
+                if val is entry:
+                    resolved[key] = label
+    warnings = []
+    for key in cfg:
+        if key not in resolved:
+            warnings.append(f"{fname}: unknown spec key '{key}' is ignored (expected one of {', '.join(sorted(labels))})")
+    for key, label in resolved.items():
+        seen = TANK_BUFFS_SEEN.get(label)
+        if not seen:
+            continue   # no tank of this spec in the build: nothing to check against
+        entry = cfg[key]
+        missing = sorted((entry["am"] | entry["major"]) - set(seen))
+        if missing:
+            names = ", ".join(f"{entry['names'].get(i, 'id')} ({i})" for i in missing)
+            warnings.append(f"{fname}: {label} ids never seen in any {label} tank's buffs in this range: {names} "
+                            f"- check the ids against data/tank_buffs_seen.json")
+    return warnings
+
+
 def validate_config(bosses: dict) -> None:
-    """Warn about config that cannot do what it says: typos in avoidable.json, contradictory nights.json entries."""
+    """Warn about config that cannot do what it says: typos in avoidable.json, contradictory nights.json entries,
+    tank_mitigation.json ids never seen on a tank."""
     from collect_data import normalize, night_overrides, excluded_bosses, NIGHTS_FILE, clean_code
     from dash.common import load_avoidable, AVOIDABLE_FILE
     warnings = []
@@ -87,6 +141,7 @@ def validate_config(bosses: dict) -> None:
     both = {clean_code(c) for c in ov.get("_include") or []} & set(ov.get("_ignore") or [])
     if both:
         warnings.append(f"{os.path.basename(NIGHTS_FILE)}: {', '.join(sorted(both))} are in both _include and _ignore (ignore wins)")
+    warnings.extend(tank_mitigation_warnings())
     for w in warnings:
         print(f"  ! {w}")
     if warnings:
@@ -120,6 +175,18 @@ def main():
                     help="embed the per-boss data as plain JSON instead of gzip (bigger file; handy for debugging)")
     args = ap.parse_args()
     if args.refresh:
+        # A full re-download burns thousands of points: refuse up front if most of the hour is already spent.
+        try:
+            wcl_client.run_query(RATE_QUERY)
+        except WCLRateLimited as exc:
+            print(f"stopped: {exc}")
+            sys.exit(3)
+        rate = dict(wcl_client.last_rate)
+        spent, limit = rate.get("pointsSpentThisHour") or 0, rate.get("limitPerHour") or 0
+        if limit and spent > RATE_REFRESH_MAX_FRACTION * limit:
+            print(f"stopped: --refresh refused, {spent:.0f} of {limit:.0f} hourly points already spent "
+                  f"(> {RATE_REFRESH_MAX_FRACTION:.0%}); resets in {rate.get('pointsResetIn', 0):.0f} s")
+            sys.exit(3)
         import cache
         cache.FORCE_REFRESH = True
         print("--refresh: ignoring cache, re-downloading everything")
@@ -132,9 +199,18 @@ def main():
     if not args.no_mplus:
         update_mplus_if_stale(force=args.mplus)
 
-    bosses = collect(args.start, args.end, difficulties=args.difficulty, boss=args.boss,
-                     zone=args.zone, player=args.player, progression_only=args.progression_only, nights=args.nights,
-                     reports=args.reports)
+    def _stop_rate_limited(exc: WCLRateLimited):
+        reset_in = exc.reset_in if exc.reset_in is not None else wcl_client.last_rate.get("pointsResetIn", 0)
+        print(f"\nstopped: hourly points exhausted, resets in {reset_in:.0f} s; "
+              "finished fights are cached, re-run later")
+        sys.exit(3)
+
+    try:
+        bosses = collect(args.start, args.end, difficulties=args.difficulty, boss=args.boss,
+                         zone=args.zone, player=args.player, progression_only=args.progression_only, nights=args.nights,
+                         reports=args.reports)
+    except WCLRateLimited as exc:
+        _stop_rate_limited(exc)
     if not bosses:
         print("No matching boss pulls found.")
         return
@@ -145,10 +221,18 @@ def main():
 
     seen_path = write_abilities_seen(bosses)
     print(f"Abilities per boss (with hit counts and who cast them) written to {os.path.basename(seen_path)}")
+    tank_path = write_tank_buffs_seen()
+    if tank_path:
+        print(f"Buff ids seen on tanks when hit (to verify tank_mitigation.json) written to {os.path.basename(tank_path)}")
     validate_config(bosses)
 
     output = args.output or os.path.join(DASHBOARD_DIR, f"dashboard_{args.start}_to_{args.end}.html")
-    html = build_html(bosses, args)
+    try:
+        # build_html -> zone_encounter_order -> cached_query can hit the API when a
+        # zone order is not cached yet, so it can run out of points too.
+        html = build_html(bosses, args)
+    except WCLRateLimited as exc:
+        _stop_rate_limited(exc)
     with open(output, "w", encoding="utf-8") as f:
         f.write(html)
     print(f"\nDashboard written to: {os.path.abspath(output)} ({len(html.encode('utf-8')) / 1e6:.1f} MB)")

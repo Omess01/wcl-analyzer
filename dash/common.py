@@ -8,6 +8,7 @@ from collections import Counter, defaultdict
 
 import plotly.graph_objects as go
 
+import specs
 from collect_data import normalize, busy_ms_between
 from path import CONFIG_DIR, DATA_DIR
 
@@ -132,8 +133,11 @@ def ignore_set(config: dict) -> set:
 # Roles
 # --------------------------------------------------------------------------
 
-TANK_SPECS = {"Protection", "Blood", "Vengeance", "Guardian", "Brewmaster"}
-HEALER_SPECS = {"Holy", "Discipline", "Restoration", "Mistweaver", "Preservation"}
+# spec tokens per role come from specs.py (the same lists reach dash.js through the `cfg` JSON script)
+_ROLE_SETS = specs.role_sets()
+TANK_SPECS = frozenset(_ROLE_SETS["tanks"])
+HEALER_SPECS = frozenset(_ROLE_SETS["healers"])
+SUPPORT_SPECS = frozenset(_ROLE_SETS["support"])
 
 
 def spec_role(spec: str) -> str:
@@ -145,15 +149,20 @@ def spec_role(spec: str) -> str:
 
 
 def pull_specs(p: dict) -> dict:
-    """name -> spec for ONE pull, from WCL's damage/healing tables (healing table wins for healers)."""
-    specs: dict[str, str] = {}
+    """name -> spec token for ONE pull. The CombatantInfo specID (`spec_ids`) wins; players without one fall back to
+    WCL's damage/healing tables (healing table wins for healers)."""
+    out: dict[str, str] = {}
     for e in (p.get("damage_done") or []):
         if e.get("spec"):
-            specs[e["name"]] = e["spec"]
+            out[e["name"]] = e["spec"]
     for e in (p.get("healing_done") or []):
         if e.get("spec") and spec_role(e["spec"]) == "healer":
-            specs[e["name"]] = e["spec"]
-    return specs
+            out[e["name"]] = e["spec"]
+    for name, sid in (p.get("spec_ids") or {}).items():
+        known = specs.spec_of(sid)
+        if known:
+            out[name] = known[1]
+    return out
 
 
 def player_roles(pulls: list[dict]) -> dict:

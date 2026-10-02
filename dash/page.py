@@ -5,9 +5,10 @@ import re
 from collections import Counter
 from datetime import datetime
 
+import specs
 from collect_data import normalize, zone_encounter_order
 from .common import esc, json_for_script, load_avoidable, player_role_labels, PLOTLY_CDN
-from .payload import pull_grid, pull_payload
+from .payload import pull_grid, pull_payload, all_metrics, players_data, _encode
 from .home import home_tab
 from .raid import raid_tab
 from .players import players_tab
@@ -21,8 +22,9 @@ def static_file(name: str) -> str:
         return f.read()
 
 
-def boss_tab(pulls: list[dict], boss_name: str, difficulty: str, avoidable_cfg: dict, tab_id: str, compress: bool) -> str:
-    mime, text = pull_payload(pulls, boss_name, difficulty, avoidable_cfg, compress=compress)
+def boss_tab(pulls: list[dict], boss_name: str, difficulty: str, avoidable_cfg: dict, tab_id: str, compress: bool,
+             pm: list[dict] | None = None) -> str:
+    mime, text = pull_payload(pulls, boss_name, difficulty, avoidable_cfg, compress=compress, pm=pm)
     return f"""
     <script type='{mime}' id='data_{tab_id}'>{text}</script>
     <h2>Pulls</h2>
@@ -74,6 +76,8 @@ def build_html(bosses: dict, args) -> str:
     ordered = sorted(bosses.items(), key=boss_order_key(bosses))
     avoidable_cfg = load_avoidable()
     compress = not getattr(args, "uncompressed", False)
+    mode = getattr(args, "callouts", None) or os.getenv("HOME_CALLOUTS", "anonymous")   # same rule as home.home_tab
+    pm_by_key = all_metrics(bosses, avoidable_cfg)
 
     tab_buttons = _tab_button("tabHome", "Home", "home", active=True)
     tab_panels = _tab_panel("tabHome", home_tab(bosses, ordered, avoidable_cfg, args), active=True)
@@ -88,7 +92,8 @@ def build_html(bosses: dict, args) -> str:
         tab_buttons += _tab_button(tab_id, f"{esc(name)}<span class='sub'>{esc(diff)} &middot; {n_pulls} pull{'s' if n_pulls != 1 else ''}</span> <span class='badge'>{esc(badge)}</span>",
                                    extra_class="boss", attrs=f" data-diff='{esc(diff)}' data-name='{esc(name)}'")
         tab_panels += _tab_panel(tab_id, f"<h1>{esc(name)} <span class='diff'>{esc(diff)}</span></h1>"
-                                         + boss_tab(pulls, name, diff, avoidable_cfg, tab_id, compress), busy=True)
+                                         + boss_tab(pulls, name, diff, avoidable_cfg, tab_id, compress,
+                                                    pm=pm_by_key.get((name, diff))), busy=True)
     # difficulty segment: one row of boss tabs at a time when several difficulties are present
     diffbar = ""
     if len(diffs_present) > 1:
@@ -111,7 +116,12 @@ def build_html(bosses: dict, args) -> str:
         tab_buttons += _tab_button("tabRaid", "Raid", "players")
         tab_panels += _tab_panel("tabRaid", raid_tab(bosses))
     tab_buttons += _tab_button("tabPlayers", "Players")
-    tab_panels += _tab_panel("tabPlayers", f"<div class='static' id='static_tabPlayers'>{players_tab(bosses, avoidable_cfg)}</div>"
+    players_block = players_data(bosses, ordered, avoidable_cfg, pm_by_key, mode == "named")   # = players_payload()
+    pmime, ptext = _encode(players_block, compress)
+    players_html = players_tab(bosses, avoidable_cfg, mode=mode, players_block=players_block, pm_by_key=pm_by_key,
+                               ordered=ordered)
+    tab_panels += _tab_panel("tabPlayers", f"<script type='{pmime}' id='data_tabPlayers'>{ptext}</script>"
+                                           f"<div class='static' id='static_tabPlayers'>{players_html}</div>"
                                            f"<div class='pull-detail' id='detail_tabPlayers' aria-live='polite'></div>")
 
     # global filters: every raid night and every player across all bosses
@@ -145,7 +155,8 @@ def build_html(bosses: dict, args) -> str:
   <label class='filter'><input type='checkbox' id='gWide'> wide layout</label>
 </div></details>
 </div></div>
-<script type='application/json' id='tab_names'>{json_for_script(tab_names)}</script>"""
+<script type='application/json' id='tab_names'>{json_for_script(tab_names)}</script>
+<script type='application/json' id='cfg'>{json_for_script({**specs.role_sets(), "named": mode == "named"})}</script>"""
     mplus_html = mplus_tab()
     if mplus_html:
         tab_buttons += _tab_button("tabMplus", "Mythic+")

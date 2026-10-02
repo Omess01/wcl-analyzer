@@ -256,3 +256,256 @@ def test_pull_initiator_empty_inputs():
     assert _who([], []) is None
     assert _who(None, None) is None
     assert _who([_ev("damage", 2, 101, 10_050)], [], hostile=frozenset()) is None
+
+
+# --- fetcher hygiene: buffs targetID, nextPageTimestamp pagination, filter variable ---------------
+
+def _buff(src, tgt, ability=1, ts=10_500, kind="applybuff"):
+    return {"timestamp": ts, "type": kind, "sourceID": src, "targetID": tgt, "abilityGameID": ability}
+
+
+def test_attach_casts_keeps_only_buffs_targeting_the_dying_actor():
+    lab = Labeller()
+    actors = {4: {"name": "Healer", "class": "Priest", "server": "TM"},
+              13: {"name": "Tank", "class": "Warrior", "server": "TM"},
+              7: {"name": "Helper", "class": "Paladin", "server": "TM"}}
+    lab.learn(actors)
+    names = {1: "Pain Suppression", 2: "Blessing of Sacrifice", 3: "Power Word: Shield"}
+    death = {"actor_id": 4, "seconds_into_fight": 1.0}
+    buffs = [_buff(4, 13, 1),    # dying healer casts on the tank: NOT an external they received
+             _buff(7, 4, 2),     # someone else on the dying healer: external
+             _buff(4, 4, 3)]     # self-buff: not an external
+    collect_data.attach_casts(death, [], buffs, {"startTime": 10_000}, actors, lab, names, ["pain sup", "sacrifice", "shield"])
+    assert death["externals"] == [[0.5, "Blessing of Sacrifice", "Helper"]]
+
+
+class _Pool:
+    def map(self, fn, items):
+        return map(fn, items)
+
+
+def _page_stub(alias, pages, calls):
+    """run_query stub: returns `pages` in order for `alias`, recording (query, variables)."""
+    def stub(query, variables):
+        calls.append((query, dict(variables)))
+        return {"reportData": {"report": {alias: pages[len(calls) - 1]}}}
+    return stub
+
+
+def test_consumable_casts_follow_next_page(monkeypatch, tmp_path):
+    import cache
+    monkeypatch.setattr(cache, "CACHE_DIR", str(tmp_path))
+    calls = []
+    pages = [{"data": [{"timestamp": 1}], "nextPageTimestamp": 5000},
+             {"data": [{"timestamp": 5000}], "nextPageTimestamp": None}]
+    monkeypatch.setattr(collect_data, "run_query", _page_stub("cons_3", pages, calls))
+    before = cache.stats["api_calls"]
+    fight = {"id": 3, "startTime": 10_000, "endTime": 20_000}
+    out = collect_data.get_consumable_casts("ABC", [fight], [111], lambda f: False, _Pool())
+    assert out[3] == [{"timestamp": 1}, {"timestamp": 5000}]
+    assert len(calls) == 2 and cache.stats["api_calls"] - before == 2
+    assert "startTime: 5000," in calls[1][0] and calls[1][1] == calls[0][1]
+    assert cache.get_entry(collect_data._cons_key("ABC", 3, [111])) == {"data": out[3]}
+
+
+def test_first_death_casts_follow_next_page(monkeypatch, tmp_path):
+    import cache
+    monkeypatch.setattr(cache, "CACHE_DIR", str(tmp_path))
+    calls = []
+
+    def stub(query, variables):
+        calls.append(query)
+        if len(calls) == 1:
+            return {"reportData": {"report": {"casts_2": {"data": [{"a": 1}], "nextPageTimestamp": None},
+                                              "buffs_2": {"data": [{"b": 1}], "nextPageTimestamp": 12_000}}}}
+        return {"reportData": {"report": {"buffs_2": {"data": [{"b": 2}], "nextPageTimestamp": None}}}}
+    monkeypatch.setattr(collect_data, "run_query", stub)
+    before = cache.stats["api_calls"]
+    fight = {"id": 2, "startTime": 10_000, "endTime": 30_000}
+    death = {"actor_id": 4, "seconds_into_fight": 5.0}
+    out = collect_data.get_first_death_casts("ABC", [(fight, death, False)], 6.0, _Pool())
+    assert out[2] == {"casts": [{"a": 1}], "buffs": [{"b": 1}, {"b": 2}]}
+    assert len(calls) == 2 and cache.stats["api_calls"] - before == 2
+    assert "buffs_2:" in calls[1] and "casts_2:" not in calls[1] and "targetID: 4" in calls[1]
+
+
+def test_bundle_cinfo_follows_next_page(monkeypatch, tmp_path):
+    import cache
+    monkeypatch.setattr(cache, "CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(collect_data, "_bundle_extras_ok", True)
+    calls = []
+
+    def stub(query, variables):
+        calls.append(query)
+        if len(calls) == 1:
+            return {"reportData": {"report": {"cinfo_5": {"data": [{"c": 1}], "nextPageTimestamp": 15_000}}}}
+        return {"reportData": {"report": {"cinfo_5": {"data": [{"c": 2}], "nextPageTimestamp": None}}}}
+    monkeypatch.setattr(collect_data, "run_query", stub)
+    before = cache.stats["api_calls"]
+    out = collect_data._fetch_bundle_batch("ABC", [{"id": 5, "startTime": 10_000, "endTime": 20_000}], 0)
+    assert out[5]["cinfo"] == [{"c": 1}, {"c": 2}]
+    assert len(calls) == 2 and cache.stats["api_calls"] - before == 2
+    assert "nextPageTimestamp" in calls[0] and "startTime: 15000," in calls[1]
+
+
+def test_bundle_cinfo_follow_up_failure_degrades_and_is_not_cached(monkeypatch, tmp_path, capsys):
+    import cache
+    from wcl_client import WCLError
+    monkeypatch.setattr(cache, "CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(collect_data, "_bundle_extras_ok", True)
+    monkeypatch.setattr(collect_data, "_cinfo_page_warning_shown", False)
+    calls = []
+
+    def stub(query, variables):
+        calls.append(query)
+        if len(calls) == 1:
+            return {"reportData": {"report": {"cinfo_5": {"data": [{"c": 1}], "nextPageTimestamp": 15_000}}}}
+        raise WCLError("page 2 failed")
+    monkeypatch.setattr(collect_data, "run_query", stub)
+    out = collect_data._fetch_bundle_batch("ABC", [{"id": 5, "startTime": 10_000, "endTime": 20_000}], 0)
+    assert out[5]["cinfo"] == [{"c": 1}]                      # page 1 kept
+    assert out[5]["extras"] is True
+    assert len(calls) == 2
+    assert cache.get_entry(collect_data._bundle_key("ABC", 5, True)) is None   # re-fetched next run
+    assert "combatant info page 2+ unavailable" in capsys.readouterr().out
+
+
+def test_follow_pages_stops_on_non_advancing_cursor(monkeypatch):
+    calls = []
+    pages = [{"data": [{"t": 2}], "nextPageTimestamp": 5000}]   # follow-up returns the same cursor again
+    monkeypatch.setattr(collect_data, "run_query", _page_stub("x_1", pages, calls))
+    fight = {"id": 1, "startTime": 0, "endTime": 10_000}
+    out = collect_data._follow_pages("ABC", fight, "test", "x_1", lambda s: f"x_1: events(startTime: {s})",
+                                     {"data": [{"t": 1}], "nextPageTimestamp": 5000}, "Q")
+    assert out == [{"t": 1}, {"t": 2}]
+    assert len(calls) == 1                                    # stopped after one follow-up
+
+
+def test_follow_pages_stops_on_backwards_cursor(monkeypatch):
+    calls = []
+    pages = [{"data": [{"t": 2}], "nextPageTimestamp": 4000}]
+    monkeypatch.setattr(collect_data, "run_query", _page_stub("x_1", pages, calls))
+    fight = {"id": 1, "startTime": 0, "endTime": 10_000}
+    out = collect_data._follow_pages("ABC", fight, "test", "x_1", lambda s: f"x_1: events(startTime: {s})",
+                                     {"data": [{"t": 1}], "nextPageTimestamp": 5000}, "Q")
+    assert out == [{"t": 1}, {"t": 2}] and len(calls) == 1
+
+
+def test_follow_pages_page_cap(monkeypatch, capsys):
+    monkeypatch.setattr(collect_data, "MAX_PAGES", 3)
+    monkeypatch.setattr(collect_data, "_pages_cap_warning_shown", False)
+    calls = []
+    pages = [{"data": [{"t": i}], "nextPageTimestamp": 1000 * (i + 2)} for i in range(10)]   # never ends
+    monkeypatch.setattr(collect_data, "run_query", _page_stub("x_1", pages, calls))
+    fight = {"id": 1, "startTime": 0, "endTime": 100_000}
+    out = collect_data._follow_pages("ABC", fight, "test", "x_1", lambda s: f"x_1: events(startTime: {s})",
+                                     {"data": [], "nextPageTimestamp": 1000}, "Q")
+    assert len(calls) == 3 and out == [{"t": 0}, {"t": 1}, {"t": 2}]
+    assert "after 3 follow-ups" in capsys.readouterr().out
+
+
+def test_consumable_filter_is_a_graphql_variable(monkeypatch, tmp_path):
+    import cache
+    monkeypatch.setattr(cache, "CACHE_DIR", str(tmp_path))
+    calls = []
+    monkeypatch.setattr(collect_data, "run_query",
+                        _page_stub("cons_9", [{"data": [{"x": 1}], "nextPageTimestamp": None}], calls))
+    fight = {"id": 9, "startTime": 10_000, "endTime": 20_000}
+    collect_data.get_consumable_casts("ABC", [fight], [222, 111], lambda f: False, _Pool())
+    (query, variables), = calls
+    assert "$filter: String" in query and "filterExpression: $filter" in query
+    assert "ability.id in (" not in query and "nextPageTimestamp" in query
+    assert variables == {"code": "ABC", "filter": "ability.id in (111,222)"}
+    key = collect_data._cons_key("ABC", 9, [111, 222])
+    assert key == f"cons:{collect_data.CONSUMABLES_VERSION}:ABC:9:" + __import__("hashlib").sha1(b"111,222").hexdigest()[:12]
+    assert cache.get_entry(key) == {"data": [{"x": 1}]}
+
+
+# ---- specs.py: the one spec / role table -------------------------------------
+
+def _fixture_bundles():
+    import glob
+    import json
+    import os
+    out = []
+    for path in sorted(glob.glob(os.path.join(os.path.dirname(__file__), "fixtures", "cache", "*.json"))):
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict) and "cinfo" in d and "damage" in d:
+            out.append(d)
+    return out
+
+
+def test_every_fixture_spec_id_resolves():
+    import specs
+    bundles = _fixture_bundles()
+    assert bundles, "fixture bundles with cinfo missing"
+    ids = {ev["specID"] for b in bundles for ev in b.get("cinfo") or [] if ev.get("specID")}
+    assert len(ids) >= 10
+    assert [i for i in sorted(ids) if specs.spec_of(i) is None] == []
+
+
+def test_fixture_icon_tokens_match_spec_table():
+    import specs
+    checked = 0
+    for b in _fixture_bundles():
+        sid_by_source = {ev["sourceID"]: ev["specID"] for ev in b.get("cinfo") or [] if ev.get("specID")}
+        for key in ("damage", "healing"):
+            for e in collect_data._table_entries(b.get(key)):
+                icon, typ = e.get("icon") or "", e.get("type")
+                if "-" not in icon or icon.split("-", 1)[0] != typ or e.get("id") not in sid_by_source:
+                    continue
+                cls, token, _role, _sup = specs.spec_of(sid_by_source[e["id"]])
+                assert (cls, token) == (typ, icon.split("-", 1)[1]), (e.get("name"), icon, sid_by_source[e["id"]])
+                checked += 1
+    assert checked > 0
+
+
+def test_role_sets_match_previous_literals():
+    import specs
+    rs = specs.role_sets()
+    assert set(rs["tanks"]) == {"Protection", "Blood", "Vengeance", "Guardian", "Brewmaster"}
+    assert set(rs["healers"]) == {"Holy", "Discipline", "Restoration", "Mistweaver", "Preservation"}
+    assert rs["support"] == ["Augmentation"]
+    assert len(specs.SPECS) == 40   # 39 + Devourer (1480)
+    # tokens shared by two classes must share a role, or token-based role lookup would be ambiguous
+    roles: dict = {}
+    for _cls, tok, role, _simc, _sup in specs.SPECS.values():
+        assert roles.setdefault(tok, role) == role, tok
+    assert specs.role_of_token("Havoc") == "dps" and specs.role_of_token("Holy") == "healer"
+
+
+def test_unknown_spec_id_is_none():
+    import specs
+    assert specs.spec_of(99999) is None and specs.spec_of(None) is None and specs.spec_of("x") is None
+    assert specs.spec_of(577) == ("DemonHunter", "Havoc", "dps", False)
+    assert specs.spec_of(1473)[3] is True
+
+
+def test_player_tables_fall_back_to_spec_id_when_icon_has_no_spec():
+    lab = Labeller()
+    actors = {7: {"name": "Omess", "class": "DemonHunter", "server": "TarrenMill"}}
+    lab.learn(actors)
+    bundle = {"damage": {"data": {"entries": [{"id": 7, "name": "Omess", "type": "DemonHunter", "icon": "foo.jpg", "total": 5}]}}}
+    participants = {"Omess": "DemonHunter"}
+    dmg, _ = collect_data.player_tables_from_bundle(bundle, actors, lab, participants)
+    assert dmg[0]["spec"] == ""
+    dmg, _ = collect_data.player_tables_from_bundle(bundle, actors, lab, participants, {"Omess": 577})
+    assert dmg[0]["spec"] == "Havoc"
+
+
+def test_spec_ids_from_cinfo_warns_once_per_unknown_id(capsys):
+    lab = Labeller()
+    actors = {1: {"name": "A", "class": "Mage", "server": "S"}, 2: {"name": "B", "class": "Mage", "server": "S"},
+              3: {"name": "C", "class": "Mage", "server": "S"}}
+    lab.learn(actors)
+    collect_data._unknown_spec_ids.discard(4242)
+    events = [{"sourceID": 1, "specID": 62}, {"sourceID": 2, "specID": 4242}, {"sourceID": 3, "specID": 4242}, {"sourceID": 9, "specID": 63}]
+    got = collect_data.spec_ids_from_cinfo(events, actors, lab, {"A": "Mage", "B": "Mage"})
+    collect_data.spec_ids_from_cinfo(events, actors, lab, {"A": "Mage", "B": "Mage"})
+    assert got == {"A": 62, "B": 4242}
+    assert capsys.readouterr().out.count("unknown specID 4242 for B (Mage)") == 1
+
+
+def test_fights_query_requests_wipe_called_time():
+    assert "wipeCalledTime" in collect_data.FIGHTS_QUERY

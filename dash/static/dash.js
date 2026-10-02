@@ -41,8 +41,9 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
   const topN = (o, n) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, n);
   const pctColor = p => { const t = Math.max(0, Math.min(1, p / 100)); return `rgb(${Math.round(60 + 160 * t)},${Math.round(180 - 120 * t)},70)`; };
   const parseCls = v => v >= 100 ? 'p-art' : v >= 99 ? 'p-leg' : v >= 95 ? 'p-ora' : v >= 75 ? 'p-pur' : v >= 50 ? 'p-blu' : v >= 25 ? 'p-gre' : 'p-gra';
-  const TANKS = new Set(['Protection', 'Blood', 'Vengeance', 'Guardian', 'Brewmaster']);
-  const HEALERS = new Set(['Holy', 'Discipline', 'Restoration', 'Mistweaver', 'Preservation']);
+  // role spec tokens come from specs.py via <script id='cfg'> (one table for Python and JS)
+  const CFG = JSON.parse(document.getElementById('cfg').textContent);
+  const TANKS = new Set(CFG.tanks || []), HEALERS = new Set(CFG.healers || []), SUPPORT = new Set(CFG.support || []);
   const roleOf = spec => TANKS.has(spec) ? 'tank' : HEALERS.has(spec) ? 'healer' : 'dps';
   const ROLE_LABEL = { dps: 'DPS', healer: 'Healer', tank: 'Tank' };
   const playerCell = (name, cl, role, spec) => `<span class='player ${cls(cl)}'>${escH(name)}</span>${role ? `<span class='role'>${escH(ROLE_LABEL[role] || role)}</span>` : ''}${spec ? `<br><span class='spec'>${escH(spec)}${cl && !String(spec).endsWith(cl) ? ' ' + escH(clsLabel(cl)) : ''}</span>` : ''}`;
@@ -141,8 +142,24 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
     out.sort((x, y) => ((x.p.a || 0) - (y.p.a || 0)) || (x.ti - y.ti) || ((x.p.i || 0) - (y.p.i || 0)));
     return out.map(r => ({ tab: r.tab, label: r.label, p: r.p }));
   }
-  // --- end table helpers ---
+  // Players deep link: '#tabPlayers?player=<label>'. encodeURIComponent keeps ' ( ) ! * ~ literal; ' and ( ) are
+  // encoded too so pasted links survive chat clients (Discord). Labels may be 'Name-Realm' or contain spaces/unicode.
+  const playerHash = name => '#tabPlayers' + (name ? '?player=' + encodeURIComponent(String(name)).replace(/['()!*~]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase()) : '');
+  // the player label from a hash ('#tab?player=X', 'tab?a=1&player=X' or '?player=X'), null when there is none;
+  // '+' reads as a space (form encoding), a malformed %-escape keeps the raw text
+  function parsePlayerHash(hash) {
+    const h = String(hash || ''), q = h.indexOf('?'); if (q < 0) return null;
+    for (const kv of h.slice(q + 1).split('&')) {
+      const eq = kv.indexOf('='); if ((eq < 0 ? kv : kv.slice(0, eq)) !== 'player' || eq < 0) continue;
+      const raw = kv.slice(eq + 1).replace(/\+/g, ' ');
+      let v; try { v = decodeURIComponent(raw); } catch (_) { v = raw; }
+      return v.trim() ? v : null;
+    }
+    return null;
+  }
+  // KPI tiles: items [label, value html, extra class]
   const kpisHtml = (items, extra) => `<dl class='kpis${extra ? ' ' + extra : ''}'>${items.map(([l, v, c]) => `<div class='kpi${c ? ' ' + c : ''}'><dt>${escH(l)}</dt><dd>${v}</dd></div>`).join('')}</dl>`;
+  // --- end table helpers ---
   const resLabel = p => p.k ? 'KILL' : p.p.toFixed(1) + '%';
   // series are never told apart by hue alone
   const DASHES = ['solid', 'dash', 'dot', 'dashdot'], SYMBOLS = ['circle', 'square', 'diamond', 'triangle-up', 'x', 'star'];
@@ -217,6 +234,382 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
   // The call site copies `orientation` onto every trace and `height` into chart().
   function boxLayout(n) { return { orientation: 'h', height: Math.max(320, 24 * n + 80) }; }
   // --- end pure chart helpers ---
+  // --- card components (quickjs-testable) ---
+  // Pure HTML/SVG string builders for the player card (no DOM). They use escH (table helpers) and TOK; status is a
+  // CSS class plus a glyph and a word, so colour is never the only signal. Charts with < 4 values fall back to nothing
+  // (sparkline) or a sentence (small multiples), like chart()'s skip rule.
+  const cardNum = v => typeof v === 'number' && isFinite(v);
+  const cardR1 = v => Math.round(v * 10) / 10;
+  const cardFmt = f => typeof f === 'function' ? f : (v => String(cardR1(v)));
+  const cardMedian = arr => { const s = arr.filter(cardNum).sort((a, b) => a - b), n = s.length; return !n ? null : n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2; };
+  const cardPct = (v, max) => Math.max(0, Math.min(100, max > 0 ? v / max * 100 : 0)).toFixed(1);
+  // values: numbers oldest first (non-numbers skipped); opts {w = 96, h = 28, label, fmt}. '' below 4 values.
+  // The last point is marked; <title> + aria-label carry first -> last in words.
+  function sparkline(values, opts) {
+    const o = opts || {}, vs = (values || []).filter(cardNum);
+    if (vs.length < 4) return '';
+    const w = o.w || 96, h = o.h || 28, pad = 3, f = cardFmt(o.fmt);
+    const lo = Math.min(...vs), hi = Math.max(...vs), span = hi - lo || 1;
+    const x = i => cardR1(pad + i / (vs.length - 1) * (w - 2 * pad));
+    const y = v => cardR1(hi === lo ? h / 2 : h - pad - (v - lo) / span * (h - 2 * pad));
+    const pts = vs.map((v, i) => `${x(i)},${y(v)}`).join(' '), last = vs.length - 1;
+    const title = `${o.label ? o.label + ': ' : ''}${vs.length} nights, from ${f(vs[0])} to ${f(vs[last])} (range ${f(lo)} to ${f(hi)})`;
+    return `<svg class='spark' viewBox='0 0 ${w} ${h}' width='${w}' height='${h}' role='img' aria-label='${escH(title)}'><title>${escH(title)}</title>` +
+      `<polyline points='${pts}' fill='none' stroke='${TOK.series[0]}' stroke-width='1.5' stroke-linejoin='round' stroke-linecap='round'/>` +
+      `<circle cx='${x(last)}' cy='${y(vs[last])}' r='2.5' fill='${TOK.ink}'/></svg>`;
+  }
+  // bullet bar (<= 24 px): value as the bar, target tick (role median), second tick (own median). labels:
+  // {name, target = 'role median', own = 'your median', fmt}. Every mark is also written out as text in the legend;
+  // null target / own drop that tick and its legend entry. max defaults to 110 % of the largest number given.
+  function bulletBar(value, target, own, max, labels) {
+    const l = labels || {}, f = cardFmt(l.fmt), nums = [value, target, own].filter(cardNum);
+    if (!cardNum(value)) return '';
+    const top = cardNum(max) && max > 0 ? max : Math.max(...nums) * 1.1 || 1;
+    const tick = (v, c) => cardNum(v) ? `<i class='bullet-tick ${c}' style='left:${cardPct(v, top)}%'></i>` : '';
+    const item = (c, name, v) => cardNum(v) ? `<li><span class='key ${c}' aria-hidden='true'></span>${escH(name)}: <strong>${f(v)}</strong></li>` : '';
+    return `<div class='bullet'><div class='bullet-track' aria-hidden='true'><i class='bullet-fill' style='width:${cardPct(value, top)}%'></i>${tick(target, 'target')}${tick(own, 'own')}</div>` +
+      `<ul class='bullet-legend'>${item('fill', l.name || 'This period', value)}${item('target', l.target || 'role median', target)}${item('own', l.own || 'your median', own)}</ul></div>`;
+  }
+  // status levels shared by box rows and status text: [glyph (decorative), word (screen readers + title)]
+  const CARD_LEVEL = { good: ['&#10003;', 'Good'], watch: ['!', 'Watch'], note: ['&#8226;', 'Note'] };
+  // items: [{level: 'good'|'watch'|'note', text (visible, optional), title (tooltip, optional), attrs {data-*: value}}]
+  // -> a row of real buttons; an unknown level is shown as note
+  function boxRow(items) {
+    const box = (it, i) => {
+      const lv = CARD_LEVEL[it.level] ? it.level : 'note', [glyph, word] = CARD_LEVEL[lv];
+      const tip = it.title || (it.text ? `${word}: ${it.text}` : word);
+      const attrs = Object.entries(it.attrs || {}).filter(([k, v]) => /^data-[a-z0-9-]+$/.test(k) && v != null).map(([k, v]) => ` ${k}='${escH(v)}'`).join('');
+      return `<button type='button' class='box lvl-${lv}' title='${escH(tip)}' data-i='${i}'${attrs}><span class='glyph' aria-hidden='true'>${glyph}</span><span class='sr-only'>${word}</span>${it.text ? `<span class='box-text'>${escH(it.text)}</span>` : ''}</button>`;
+    };
+    return (items || []).length ? `<div class='boxrow'>${items.map(box).join('')}</div>` : '';
+  }
+  // status word with glyph: <span class='status-watch'>! Watch</span>
+  function statusText(level) { const lv = CARD_LEVEL[level] ? level : 'note', [glyph, word] = CARD_LEVEL[lv]; return `<span class='status-${lv}'><span aria-hidden='true'>${glyph}</span> ${word}</span>`; }
+  // consistency per boss. series: [{boss, label (metric), pulls: [{v, k (kill), i (pull number)}] chronological,
+  // own (median, computed from v when absent), band [lo, hi] (grey reference band, e.g. role range) or null, fmt}].
+  // A boss with < 4 numeric pulls gets a sentence instead of a plot.
+  function smallMultiples(series) {
+    const W = 160, H = 64, P = 6;
+    const one = s => {
+      const ps = (s.pulls || []).filter(p => p && cardNum(p.v)), f = cardFmt(s.fmt), boss = escH(s.boss || '');
+      if (ps.length < 4) return `<p class='multiples-skip'>${boss}: ${ps.length} pull${ps.length === 1 ? '' : 's'} - too few to judge consistency (needs 4).</p>`;
+      const own = cardNum(s.own) ? s.own : cardMedian(ps.map(p => p.v)), band = s.band && cardNum(s.band[0]) && cardNum(s.band[1]) ? s.band : null;
+      const all = ps.map(p => p.v).concat(cardNum(own) ? [own] : [], band || []);
+      const lo = Math.min(...all), hi = Math.max(...all), span = hi - lo || 1;
+      const x = j => cardR1(P + j / (ps.length - 1) * (W - 2 * P)), y = v => cardR1(hi === lo ? H / 2 : H - P - (v - lo) / span * (H - 2 * P));
+      const kills = ps.filter(p => p.k).length, vs = ps.map(p => p.v);
+      const desc = `${s.boss || ''}${s.label ? ', ' + s.label : ''}: ${ps.length} pulls, median ${f(own)}, range ${f(Math.min(...vs))} to ${f(Math.max(...vs))}${band ? `, reference band ${f(band[0])} to ${f(band[1])}` : ''}${kills ? `, ${kills} kill${kills === 1 ? '' : 's'} (diamond)` : ''}`;
+      const bandSvg = band ? `<rect class='band' x='${P}' y='${Math.min(y(band[0]), y(band[1]))}' width='${W - 2 * P}' height='${cardR1(Math.abs(y(band[1]) - y(band[0])) || 1)}' fill='${TOK.borderStrong}' fill-opacity='0.5'/>` : '';
+      const dot = (p, j) => p.k
+        ? `<rect x='${cardR1(x(j) - 3.5)}' y='${cardR1(y(p.v) - 3.5)}' width='7' height='7' transform='rotate(45 ${x(j)} ${y(p.v)})' fill='${TOK.accent}'><title>Pull ${escH(p.i ?? j + 1)}: ${f(p.v)}, kill</title></rect>`
+        : `<circle cx='${x(j)}' cy='${y(p.v)}' r='2.5' fill='${TOK.series[0]}'><title>Pull ${escH(p.i ?? j + 1)}: ${f(p.v)}</title></circle>`;
+      return `<figure class='multiple'><svg viewBox='0 0 ${W} ${H}' role='img' aria-label='${escH(desc)}'><title>${escH(desc)}</title>${bandSvg}` +
+        `<line class='median' x1='${P}' x2='${W - P}' y1='${y(own)}' y2='${y(own)}' stroke='${TOK.ink}' stroke-width='1' stroke-dasharray='4 3'/>${ps.map(dot).join('')}</svg>` +
+        `<figcaption>${boss} <span class='vs'>median ${f(own)}</span></figcaption></figure>`;
+    };
+    return (series || []).length ? `<div class='multiples'>${series.map(one).join('')}</div>` : '';
+  }
+  // mirrors _delta() in dash/home.py (same text and classes); period replaces "previous night" ("earlier nights")
+  function deltaText(cur, prev, fmt, lowerIsBetter, period) {
+    const per = escH(period || 'previous night'), f = cardFmt(fmt);
+    if (prev == null) return "<span class='vs'>first night in range</span>";
+    const diff = cur - prev;
+    if (Math.abs(diff) < 1e-9) return `<span class='vs'>same as ${per}</span>`;
+    const better = lowerIsBetter ? diff < 0 : diff > 0, word = better ? 'better' : 'worse';
+    return `<span class='vs delta ${word}'>${diff > 0 ? '&#9650;' : '&#9660;'} ${diff > 0 ? '+' : ''}${f(diff)} vs ${per} (${f(prev)}) - ${word}</span>`;
+  }
+  // share 0-100 (null = no data) as a bar with the value written next to it (text defaults to "N%")
+  function uptimeBar(share, text) {
+    if (!cardNum(share)) return `<div class='uptime'><span class='uptime-text'>${escH(text || 'no data')}</span></div>`;
+    return `<div class='uptime'><span class='uptime-bar' aria-hidden='true'><i style='width:${cardPct(share, 100)}%'></i></span><span class='uptime-text'>${escH(text || Math.round(share) + '%')}</span></div>`;
+  }
+  // ---- player card (Players tab under the Player filter): pure model + HTML ----
+  // Inputs: lists = [{key, label, pulls, cols (boss pmcols), avoid (boss has an avoidable list), cats, usecats}] in tab
+  // order with EVERY pull (the card applies the night / nights-type filter itself, so earlier nights stay available for
+  // deltas); players = the Players-tab block (Contract E) or null; G = {night, ntype}. Pull `pm[name]` vectors follow
+  // `cols` (PM_COLS). Python scores (sev); this code only selects, caps, orders and renders.
+  const CARD_BKIND = { own: 'your earlier nights', role: 'role median', cotank: 'co-tank', band: 'reference' };
+  const CARD_METRIC = { dth: 'Deaths per pull', fd: 'First death', avm: 'Avoidable hits / min alive', nodef: 'No defensive before the first death',
+    am: 'Active mitigation at hit', prep: 'Flask, food and rune', prepot: 'Pre-pot', act: 'Active time', dps_ratio: 'Active DPS vs your role',
+    hps: 'Active HPS', oh: 'Overheal', ilvl: 'Item level', rp: 'Parse on kills', bp: 'Bracket parse on kills', gap: 'Gear gaps', ir: 'Interrupts', ds: 'Dispels' };
+  const CARD_PREP = { flask: 'Flask', food: 'Food', rune: 'Augment rune', prepot: 'Pre-pot', vantus: 'Vantus rune', combat_potion: 'Combat potions', healing_potion: 'Healing potions', healthstone: 'Healthstones', mana_potion: 'Mana potions' };
+  const CARD_SHORT_S = 60;   // pulls under a minute are left out of the active-time / throughput medians (as in severity.py)
+  const cardIdx = cols => { const o = {}; (cols || []).forEach((c, i) => { o[c] = i; }); return o; };
+  const cardPl = (n, w, ws) => `${n} ${n === 1 ? w : (ws || w + 's')}`;
+  const cardDur = s => { s = Math.round(s || 0); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+  const cardK = v => !cardNum(v) ? '-' : Math.abs(v) >= 1000 ? (v / 1000).toFixed(2) + 'M' : Math.round(v) + 'k';
+  const cardPc = v => !cardNum(v) ? '-' : Math.round(v) + '%';
+  const cardR2 = v => !cardNum(v) ? '-' : String(Math.round(v * 100) / 100);
+  const cardTypeOk = (G, p) => !G.ntype || (G.ntype === 'open') === !!p.o;
+  const cardSelOk = (G, p) => G.night ? p.n === G.night : cardTypeOk(G, p);
+  const cardQuart = (arr, q) => { const s = arr.filter(cardNum).sort((a, b) => a - b); if (!s.length) return null; const k = (s.length - 1) * q, lo = Math.floor(k); return s[lo] + (s[Math.min(lo + 1, s.length - 1)] - s[lo]) * (k - lo); };
+  // the night the card scores ("this night"): the toolbar night when it is a known night, else the latest night of the
+  // nights-type filter; `have` (optional: array / Set / object of nights) limits the choice to nights the player was in.
+  // nights = [[night, type, startMs], ...] chronological (players.nights). null when nothing qualifies.
+  function pickNight(nights, G, have) {
+    const g = G || {}, ns = nights || [];
+    const ok = n => !have || (Array.isArray(have) ? have.includes(n) : have instanceof Set ? have.has(n) : Object.prototype.hasOwnProperty.call(have, n));
+    if (g.night) return ns.some(x => x[0] === g.night) && ok(g.night) ? g.night : null;
+    const pick = ns.filter(x => (!g.ntype || x[1] === g.ntype) && ok(x[0]));
+    return pick.length ? pick[pick.length - 1][0] : null;
+  }
+  // public cap (design 7.3): at most 3 Watch items (the engine's order = most important first), every Good (so >= 1 Good
+  // whenever one exists) and every Note; named builds show everything. Order is kept.
+  function capItems(items, named) {
+    const all = (items || []).filter(Boolean);
+    if (named) return all.slice();
+    let w = 0;
+    return all.filter(it => it[4] !== 'watch' || ++w <= 3);
+  }
+  // "One thing to work on": the first Watch item in the engine's order (level, tier, score desc); null when none
+  function oneThing(items) { return (items || []).find(it => it && it[4] === 'watch') || null; }
+  // the item with the highest score among the Good ones ("best Good"), null when none
+  const bestGood = items => (items || []).filter(it => it && it[4] === 'good').reduce((b, it) => !b || (it[5] || 0) > (b[5] || 0) ? it : b, null);
+  // ADVICE template -> plain text (escape at the call site): {value} {baseline} {n} (= affected) {pulls}
+  const cardAdv = v => v == null || !cardNum(Number(v)) ? 'n/a' : Number.isInteger(Number(v)) ? String(Number(v)) : String(Math.round(Number(v) * (Math.abs(v) >= 10 ? 10 : 100)) / (Math.abs(v) >= 10 ? 10 : 100));
+  function fillAdvice(tpl, item) {
+    const it = item || [], map = { value: it[1], baseline: it[2], n: it[7], pulls: it[8] };
+    return String(tpl || `${CARD_METRIC[it[0]] || it[0] || 'Value'}: {value} (reference {baseline}).`).replace(/\{(value|baseline|n|pulls)\}/g, (_, k) => cardAdv(map[k]));
+  }
+  // one pull record per pull the player was in: {tab, label, avoid, cats, usecats, p, v(col)}, chronological
+  function cardRecs(lists, name, cols) {
+    const out = [];
+    (lists || []).forEach((l, ti) => {
+      const ix = cardIdx(l.cols || cols);
+      (l.pulls || []).forEach(p => {
+        if (!p || !p.parts || !(name in p.parts)) return;
+        const vec = (p.pm || {})[name] || [];
+        out.push({ tab: l.key, label: l.label, avoid: !!l.avoid, cats: l.cats || [], usecats: l.usecats || [], p, ti,
+          v: c => { const x = vec[ix[c]]; return cardNum(x) ? x : null; },
+          of: (who, c) => { const x = ((p.pm || {})[who] || [])[ix[c]]; return cardNum(x) ? x : null; } });
+      });
+    });
+    return out.sort((x, y) => ((x.p.a || 0) - (y.p.a || 0)) || (x.ti - y.ti) || ((x.p.i || 0) - (y.p.i || 0)));
+  }
+  // per boss tab (tab order): pulls, kills, deaths (dth, post-wipe deaths excluded), first deaths, avoidable hits per minute
+  // alive (null when the boss has no avoidable list), median active %, median / best active DPS and HPS (k)
+  function perBossRows(lists, name, cols) {
+    const by = {};
+    cardRecs(lists, name, cols).forEach(r => {
+      const e = by[r.tab] || (by[r.tab] = { key: r.tab, label: r.label, ti: r.ti, avoid: r.avoid, pulls: 0, kills: 0, deaths: 0, fd: 0, avh: 0, alv: 0, avn: 0, act: [], dps: [], hps: [] });
+      e.pulls++; if (r.p.k) e.kills++;
+      e.deaths += r.v('dth') || 0; e.fd += r.v('fd') || 0;
+      if (r.v('avh') != null) { e.avh += r.v('avh'); e.alv += Math.max(r.v('alv') || 0, 1); e.avn++; }
+      const long = (r.p.d || 0) >= CARD_SHORT_S;
+      ['act', 'dps', 'hps'].forEach(c => { if (long && r.v(c) != null) e[c].push(r.v(c)); });
+    });
+    return Object.values(by).sort((a, b) => a.ti - b.ti).map(e => ({ key: e.key, label: e.label, pulls: e.pulls, kills: e.kills, deaths: e.deaths, fd: e.fd,
+      avm: e.avoid && e.avn ? Math.round(e.avh / (e.alv / 60) * 100) / 100 : null, act: cardMedian(e.act),
+      dps: cardMedian(e.dps), bestDps: e.dps.length ? Math.max(...e.dps) : null, hps: cardMedian(e.hps), bestHps: e.hps.length ? Math.max(...e.hps) : null }));
+  }
+  // small-multiples input: one series per boss where the player has >= 4 pulls of at least a minute with `metric`
+  // (pm column, e.g. 'dps'); band = the middle half (IQR) of the same boss's values in `history` (earlier pulls), when >= 4
+  function consistencySeries(lists, name, cols, metric, history, label, fmt) {
+    const vals = recs => recs.filter(r => (r.p.d || 0) >= CARD_SHORT_S && r.v(metric) != null);
+    const past = {}; vals(cardRecs(history || [], name, cols)).forEach(r => (past[r.tab] || (past[r.tab] = [])).push(r.v(metric)));
+    const by = {}; vals(cardRecs(lists, name, cols)).forEach(r => (by[r.tab] || (by[r.tab] = { boss: r.label, ti: r.ti, pulls: [] })).pulls.push({ v: r.v(metric), k: !!r.p.k, i: r.p.i }));
+    return Object.entries(by).filter(([, s]) => s.pulls.length >= 4).sort((a, b) => a[1].ti - b[1].ti).map(([tab, s]) => {
+      const h = past[tab] || [];
+      return { boss: s.boss, label: label || metric, pulls: s.pulls, band: h.length >= 4 ? [cardQuart(h, 0.25), cardQuart(h, 0.75)] : null, fmt };
+    });
+  }
+  // one night's numbers from pull records (mirrors severity.aggregate_night): dth / pull, fd % of pulls, avm, act and
+  // throughput medians over pulls >= 60 s (throughput = hps for healers, dps otherwise), prep = % of pulls missing flask,
+  // food or rune, rp / bp mean over kills, ilvl latest
+  function cardNight(recs, role) {
+    if (!recs.length) return null;
+    const nums = c => recs.map(r => r.v(c)).filter(v => v != null), long = recs.filter(r => (r.p.d || 0) >= CARD_SHORT_S);
+    const dth = nums('dth'), avh = recs.filter(r => r.avoid && r.v('avh') != null), prep = nums('prep'), kills = recs.filter(r => r.p.k);
+    const mean = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
+    const alv = avh.reduce((a, r) => a + Math.max(r.v('alv') || 0, 1), 0);
+    const ilvl = nums('ilvl');
+    return { pulls: recs.length, dth: dth.length ? mean(dth) : null, fdN: recs.filter(r => r.v('fd') === 1).length, fd: 100 * recs.filter(r => r.v('fd') === 1).length / recs.length,
+      avm: avh.length ? avh.reduce((a, r) => a + r.v('avh'), 0) / (alv / 60) : null,
+      act: cardMedian(long.map(r => r.v('act'))), thr: cardMedian(long.map(r => r.v(role === 'healer' ? 'hps' : 'dps'))),
+      prepN: prep.length, prepMiss: prep.filter(v => (v & 7) !== 7).length, prep: prep.length ? 100 * prep.filter(v => (v & 7) !== 7).length / prep.length : null,
+      rp: mean(kills.map(r => r.v('rp')).filter(v => v != null)), bp: mean(kills.map(r => r.v('bp')).filter(v => v != null)), ilvl: ilvl.length ? ilvl[ilvl.length - 1] : null };
+  }
+  // the whole card. opts: {named, recap(death) -> html, roleOf(spec) -> role, support(spec) -> bool, copy (header html),
+  // empty (html when the player has no pulls in the selection)}
+  function playerCardHtml(name, lists, players, G, opts) {
+    const o = opts || {}, g = G || {}, PL = players || {}, recap = o.recap || (() => ''), named = !!o.named;
+    const cols = PL.cols || ((lists || []).find(l => l.cols) || {}).cols || [];
+    const ro = (PL.roster || {})[name] || {};
+    const all = cardRecs(lists, name, cols), sel = all.filter(r => cardSelOk(g, r.p));
+    const roleOfSpec = sp => sp && o.roleOf ? o.roleOf(sp) : null;
+    const roleAt = r => roleOfSpec((r.p.specs || {})[name]) || ro.role || 'dps';
+    const count = (arr, f) => arr.reduce((m, x) => { const k = f(x); if (k) m[k] = (m[k] || 0) + 1; return m; }, {});
+    const top = m => Object.entries(m).sort((a, b) => b[1] - a[1])[0];
+    const role = (top(count(sel, roleAt)) || [ro.role || 'dps'])[0];
+    const spec = (top(count(sel, r => (r.p.specs || {})[name])) || [ro.spec || ''])[0] || ro.spec || '';
+    const cl = ro.cl || ((sel[0] || all[0] || { p: { parts: {} } }).p.parts || {})[name] || '';
+    const head = sub => `<h2 class='panel-title'>${escH(name)} <span class='sub'>${sub}</span></h2>`;
+    const scope = g.night ? escH(g.night) : g.ntype === 'open' ? 'open nights' : g.ntype ? 'main nights' : 'all nights';
+    if (!sel.length) return `<div class='card player-card'>${head(scope)}${o.copy ? `<p class='card-counts'>${o.copy}</p>` : ''}${o.empty || emptyHtml('pulls', `${name} has no pulls in this selection`, 'Esc clears the filters')}</div>`;
+    // nights: the Players block's chronological list, else first-seen order of the pulls
+    const nightList = (PL.nights && PL.nights.length ? PL.nights : []).slice();
+    all.forEach(r => { if (!nightList.some(x => x[0] === r.p.n)) nightList.push([r.p.n, r.p.o ? 'open' : 'main', r.p.a || 0]); });
+    nightList.sort((a, b) => (a[2] || 0) - (b[2] || 0));
+    const selNights = [...new Set(sel.map(r => r.p.n))];
+    const night = pickNight(nightList, g, selNights) || selNights[selNights.length - 1];
+    const ntype = (nightList.find(x => x[0] === night) || [night, ''])[1];
+    const hist = nightList.filter(x => x[1] === ntype && all.some(r => r.p.n === x[0])).map(x => x[0]);
+    const histUpTo = hist.slice(0, hist.indexOf(night) + 1).slice(-12), earlier = histUpTo.slice(0, -1);
+    const nightAgg = {}; histUpTo.forEach(n => { nightAgg[n] = cardNight(all.filter(r => r.p.n === n), role); });
+    const cur = nightAgg[night] || cardNight(sel.filter(r => r.p.n === night), role);
+    const earlierRecs = all.filter(r => earlier.includes(r.p.n));
+    // severity items of this night, public cap applied
+    const items = capItems(((PL.sev || {})[name] || {})[night] || [], named), advice = PL.advice || {};
+    const nLv = lv => items.filter(it => it[4] === lv).length;
+    const roleWord = { dps: 'DPS', healer: 'Healer', tank: 'Tank' }[role] || role;
+    let html = `<div class='card player-card'>`;
+    html += `<p class='sr-only' role='status' aria-live='polite'>Card for ${escH(name)}, ${cardPl(selNights.length, 'night')}, ${cardPl(sel.length, 'pull')}</p>`;
+    html += head(`${escH([spec, cl ? clsLabel(cl) : ''].filter(Boolean).join(' '))}${spec || cl ? ' &middot; ' : ''}${escH(roleWord)} &middot; ${cardPl(selNights.length, 'night')} &middot; ${cardPl(sel.length, 'pull')} &middot; ${scope}`);
+    html += `<p class='card-counts'>${statusText('good')} ${nLv('good')} &middot; ${statusText('watch')} ${nLv('watch')} &middot; ${statusText('note')} ${nLv('note')} <span class='muted'>on ${escH(night)}</span>${o.copy ? ' ' + o.copy : ''}</p>`;
+    // block 2: one thing to work on
+    const itemLine = it => {
+      const base = it[2] == null ? 'no reference yet' : `${CARD_BKIND[it[3]] || 'reference'} ${cardAdv(it[2])}`;
+      const rank = named && it[9] ? ` &middot; rank ${escH(it[9])} in your role` : '';
+      return `<li>${statusText(it[4])} <strong>${escH(CARD_METRIC[it[0]] || it[0])}</strong>: ${escH(fillAdvice(advice[it[6]] || advice[it[0]], it))} <span class='vs'>${escH(base)}${it[4] !== 'note' || it[7] ? ` &middot; ${it[7]} of ${cardPl(it[8], 'pull')}` : ''}${rank}</span></li>`;
+    };
+    const one = oneThing(items), good = bestGood(items);
+    if (one) html += `<article class='insight warn'><h3><span class='badge'>Watch</span>One thing to work on: ${escH(CARD_METRIC[one[0]] || one[0])}</h3><p>${escH(fillAdvice(advice[one[6]] || advice[one[0]], one))}</p></article>`;
+    else html += `<article class='insight good'><h3><span class='badge'>Good</span>One thing to work on: nothing stands out</h3><p>Nothing stands out on ${escH(night)} - keep going.${good ? ' ' + escH(fillAdvice(advice[good[6]] || advice[good[0]], good)) : ''}</p></article>`;
+    const shown = items.filter(it => it[4] !== 'note'), notes = items.filter(it => it[4] === 'note');
+    if (shown.length) html += `<ul class='card-items'>${shown.map(itemLine).join('')}</ul>`;
+    if (notes.length) html += `<details class='card-notes'><summary>${cardPl(notes.length, 'note')} for ${escH(night)}</summary><ul class='card-items'>${notes.map(itemLine).join('')}</ul></details>`;
+    if (!items.length) html += `<p class='section-note'>No Good / Watch / Note items for ${escH(night)}${PL.sev ? '' : ' (the Players data is missing from this build)'}.</p>`;
+    if (!named && ((PL.sev || {})[name] || {})[night] && ((PL.sev[name][night]).filter(it => it[4] === 'watch').length > 3)) html += `<p class='section-note'>Showing the 3 most important Watch items.</p>`;
+    // block 3: KPI tiles for this night, delta vs your earlier nights (same night type), sparkline over the nights
+    const anyAvoid = sel.some(r => r.avoid);
+    const thrLabel = role === 'healer' ? 'Median active HPS' : 'Median active DPS';
+    const tiles = [
+      ['Deaths / pull', a => a.dth, cardR2, true, a => cardR2(a.dth)],
+      ['First death', a => a.fd, cardPc, true, a => `${a.fdN} of ${cardPl(a.pulls, 'pull')}`],
+      anyAvoid ? ['Avoidable hits / min alive', a => a.avm, cardR2, true, a => cardR2(a.avm)] : null,
+      ['Active time', a => a.act, cardPc, false, a => cardPc(a.act)],
+      [thrLabel, a => a.thr, cardK, false, a => cardK(a.thr)],
+      ['Prep misses (flask, food, rune)', a => a.prep, cardPc, true, a => a.prepN ? `${a.prepMiss} of ${cardPl(a.prepN, 'pull')}` : '-'],
+      ['Kills: parse / bracket', a => a.rp, v => cardNum(v) ? String(Math.round(v)) : '-', false, a => a.rp == null && a.bp == null ? '-' : `${a.rp == null ? '-' : Math.round(a.rp)} &middot; ${a.bp == null ? '-' : Math.round(a.bp)}`],
+      ['Item level', a => a.ilvl, v => cardNum(v) ? String(Math.round(v)) : '-', false, a => a.ilvl == null ? '-' : String(a.ilvl)],
+    ].filter(Boolean);
+    const trend = histUpTo.length >= 2;
+    html += `<h3>${escH(night)}: key numbers</h3>`;
+    html += kpisHtml(tiles.map(([label, get, fmt, lower, show]) => {
+      const v = cur ? get(cur) : null;
+      const prev = cardMedian(earlier.map(n => nightAgg[n] && get(nightAgg[n])).filter(cardNum));
+      const nPrev = earlier.filter(n => nightAgg[n] && cardNum(get(nightAgg[n]))).length;
+      const delta = !trend || v == null ? '' : prev == null ? "<span class='vs'>no earlier value</span>" : deltaText(v, prev, fmt, lower, `your ${cardPl(nPrev, 'earlier night')}`);
+      const spark = sparkline(histUpTo.map(n => nightAgg[n] ? get(nightAgg[n]) : null), { label, fmt });
+      return [label, `${cur ? show(cur) : '-'}${v == null ? " <span class='vs'>no data this night</span>" : ''}${delta}${spark}`];
+    }), 'card-kpis');
+    html += trend ? `<p class='section-note'>Deltas compare ${escH(night)} with the median of your earlier ${ntype === 'open' ? 'open' : 'main'} nights in this build; sparklines need 4 nights.</p>`
+      : `<p class='section-note'>First nights &mdash; no trend yet. Deltas appear once you have an earlier ${ntype === 'open' ? 'open' : 'main'} night in this build, sparklines after 4 nights.</p>`;
+    // block 4: per boss
+    const selLists = (lists || []).map(l => Object.assign({}, l, { pulls: (l.pulls || []).filter(p => cardSelOk(g, p)) }));
+    const rows = perBossRows(selLists, name, cols), heal = role === 'healer', thrKey = heal ? 'hps' : 'dps', bestKey = heal ? 'bestHps' : 'bestDps';
+    const sortCell = (v, txt) => `<td data-sort='${cardNum(v) ? v : -1}'>${txt}</td>`;
+    html += `<h3>Per boss</h3>` + tbl([['Boss', 'str'], ['Pulls', 'num'], ['Kills', 'num'], ['Deaths', 'num'], ['First deaths', 'num'], ['Avoidable / min alive', 'num'], ['Active', 'num'], [heal ? 'Median HPS' : 'Median DPS', 'num'], [heal ? 'Best HPS' : 'Best DPS', 'num']],
+      rows.map(e => `<tr><td data-sort='${escH(e.label)}'><button type='button' class='gotab linklike' data-tab='${escH(e.key)}'>${escH(e.label)}</button></td><td>${e.pulls}</td><td>${e.kills}</td><td>${e.deaths}</td><td>${e.fd}</td>${sortCell(e.avm, e.avm == null ? "<span class='muted'>-</span>" : cardR2(e.avm))}${sortCell(e.act, cardPc(e.act))}${sortCell(e[thrKey], cardK(e[thrKey]))}${sortCell(e[bestKey], cardK(e[bestKey]))}</tr>`),
+      '', `${cardPl(rows.length, 'boss', 'bosses')} in this selection; active and throughput use pulls of a minute or longer, active DPS / HPS = output per second of activity`);
+    html += `<p class='section-note'>Click a boss name to open that tab with the same filters.</p>`;
+    // block 5: consistency
+    const metric = heal ? 'hps' : 'dps', mLabel = heal ? 'active HPS' : 'active DPS';
+    const series = consistencySeries(selLists, name, cols, metric, (lists || []).map(l => Object.assign({}, l, { pulls: (l.pulls || []).filter(p => earlier.includes(p.n)) })), mLabel, cardK);
+    html += `<h3>Consistency</h3>`;
+    html += series.length ? smallMultiples(series) + `<p class='section-note'>Dots: your ${mLabel} per pull of a minute or longer (diamond = kill); dashed line: your median; grey band: the middle half of your earlier nights on that boss, when there are 4 such pulls.</p>`
+      : `<p class='section-note'>No boss has 4 or more of your pulls (a minute or longer) in this selection, so there is nothing to judge consistency on yet.</p>`;
+    // block 6: role section
+    const roleSel = sel.filter(r => roleAt(r) === role), long = roleSel.filter(r => (r.p.d || 0) >= CARD_SHORT_S);
+    const othersMed = (r, c, keep) => cardMedian(Object.keys(r.p.pm || {}).filter(n => n !== name && keep(n)).map(n => r.of(n, c)));
+    const isRole = (r, want) => n => { const sp = (r.p.specs || {})[n]; const rr = roleOfSpec(sp) || ((PL.roster || {})[n] || {}).role; return rr === want && !(o.support && o.support(sp)); };
+    const others = (c, want) => { const per = long.map(r => othersMed(r, c, isRole(r, want))).filter(cardNum); return per.length ? cardMedian(per) : null; };
+    const othersN = want => Math.max(0, ...long.map(r => Object.keys(r.p.pm || {}).filter(n => n !== name && isRole(r, want)(n)).length));
+    const mine = c => cardMedian(long.map(r => r.v(c)));
+    const mineEarlier = c => cardMedian(earlierRecs.filter(r => roleAt(r) === role && (r.p.d || 0) >= CARD_SHORT_S).map(r => r.v(c)));
+    html += `<h3>${escH(roleWord)}${spec ? ' (' + escH(spec) + ')' : ''}</h3>`;
+    if (role === 'tank') {
+      const am = mine('am'), amw = mine('amw'), mit = mine('mit');
+      html += `<p class='card-line'>Active mitigation up at the moment of each hit taken (median of your pulls):</p>` +
+        uptimeBar(am, am == null ? 'no aura data for your spec in these pulls (config/tank_mitigation.json)' : `${Math.round(am)}% of hits${amw == null ? '' : `, ${Math.round(amw)}% weighted by damage`}`);
+      html += `<p class='card-line'>Mitigated share of incoming damage: <strong>${cardPc(mit)}</strong> <span class='muted'>(mitigated + absorbed / unmitigated, median per pull)</span></p>`;
+      const pairs = roleSel.map(r => { const co = Object.keys(r.p.pm || {}).filter(n => n !== name && isRole(r, 'tank')(n)); return { r, me: r.v('dtps'), co: co.map(n => [n, r.of(n, 'dtps')]).filter(x => x[1] != null) }; }).filter(x => x.me != null);
+      const mx = Math.max(1, ...pairs.map(x => Math.max(x.me, ...x.co.map(c => c[1]))));
+      const kps = v => (v / 10).toFixed(1) + 'k';
+      html += pairs.length ? tbl([['Boss', 'str'], ['Pull', 'num'], ['You (DTPS)', 'num'], ['Co-tank (DTPS)', 'num']],
+        pairs.map(x => `<tr><td>${escH(x.r.label)}</td><td>${x.r.p.i}</td><td data-sort='${x.me}'>${bar(x.me / mx * 100)} ${kps(x.me)}</td><td data-sort='${x.co.length ? x.co[0][1] : -1}'>${x.co.length ? x.co.map(c => `${bar(c[1] / mx * 100)} ${kps(c[1])} <span class='muted'>${named ? escH(c[0]) : 'co-tank'}</span>`).join('<br>') : "<span class='muted'>no co-tank</span>"}</td></tr>`),
+        '', `Damage taken per second alive (thousands), you and your co-tank on the same pull, ${cardPl(pairs.length, 'pull')}`, 15)
+        : `<p class='section-note'>No damage-taken data for your pulls.</p>`;
+      html += `<p class='section-note'>Death recaps below mark whether active mitigation was up on each of the last hits.</p>`;
+    } else if (role === 'healer') {
+      const hps = mine('hps'), oh = mine('oh'), ohRole = others('oh', 'healer'), nH = othersN('healer');
+      const kills = sel.filter(r => r.p.k), mean = a => a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : null;
+      const rp = mean(kills.map(r => r.v('rp')).filter(cardNum)), bp = mean(kills.map(r => r.v('bp')).filter(cardNum));
+      html += kpisHtml([['Median active HPS', cardK(hps)], ['HPS parse / bracket (kills)', rp == null && bp == null ? `- <span class='vs'>no kills in this selection</span>` : `${rp == null ? '-' : rp} &middot; ${bp == null ? '-' : bp}`]], 'card-kpis');
+      html += cardNum(oh) ? bulletBar(oh, nH ? ohRole : 30, mineEarlier('oh'), 100, { name: 'Your median overheal', target: nH ? `healer median (${cardPl(nH, 'other')})` : 'reference', own: 'your earlier nights', fmt: cardPc }) + `<p class='section-note'>Lower overheal is better.</p>`
+        : `<p class='section-note'>No overheal data in these pulls.</p>`;
+      const dps = mine('dps'), dpsRole = others('dps', 'dps');
+      html += cardNum(dps) ? `<p class='card-line'>${statusText('note')} Damage done: <strong>${cardK(dps)}</strong> active DPS${cardNum(dpsRole) && dpsRole > 0 ? `, ${Math.round(dps / dpsRole * 100)}% of the DPS players' median (${cardK(dpsRole)}); a quarter is excellent for a healer, per community guides` : ''}.</p>` : '';
+    } else {
+      const dps = mine('dps'), dpsRole = others('dps', 'dps'), nD = othersN('dps');
+      html += cardNum(dps) ? bulletBar(dps, dpsRole, mineEarlier('dps'), null, { name: 'Your median active DPS', target: `DPS median (${cardPl(nD, 'other')})`, own: 'your earlier nights', fmt: cardK })
+        : `<p class='section-note'>No active DPS data in these pulls.</p>`;
+      if (named && spec) {
+        const same = r => n => (r.p.specs || {})[n] === spec;
+        const per = long.map(r => othersMed(r, 'dps', same(r))).filter(cardNum), nS = Math.max(0, ...long.map(r => Object.keys(r.p.pm || {}).filter(n => n !== name && same(r)(n)).length));
+        html += `<p class='card-line'>Same spec (${escH(spec)}): ${per.length ? `median <strong>${cardK(cardMedian(per))}</strong> active DPS over ${cardPl(nS, 'other player')} in the same pulls` : 'no other player of your spec in these pulls'}.</p>`;
+      }
+      html += `<p class='section-note'>Active DPS = damage per second of your active time, so it does not punish time spent dead or moving.</p>`;
+    }
+    // block 7: deaths report card
+    const deaths = [], wcAny = sel.some(r => r.p.wc != null); let afterWipe = 0;
+    sel.forEach(r => (r.p.deaths || []).forEach((d, k) => { if (d.pl !== name) return; if (r.p.wc != null && d.s > r.p.wc) { afterWipe++; return; } deaths.push({ r, d, first: k === 0 }); }));
+    const defWord = x => !x.first ? 'not tracked' : !x.d.hc ? 'unknown' : x.d.def && x.d.def.length ? 'used' : 'none';
+    html += `<h3>Deaths (${deaths.length})</h3>`;
+    if (deaths.length) {
+      html += `<div class='card-deaths'>` + boxRow(deaths.map((x, i) => {
+        const dw = defWord(x), ext = x.first && x.d.ext && x.d.ext.length;
+        const lvl = x.d.av || (x.first && dw === 'none' && !ext) ? 'watch' : x.first && dw === 'used' ? 'good' : 'note';
+        const tags = [x.first ? 'first' : '', x.d.av ? 'avoidable' : ''].filter(Boolean);
+        const title = `${x.r.label} pull ${x.r.p.i}, ${cardDur(x.d.s)}: killed by ${x.d.kb || '?'}${x.first ? ', first death' : ''}${x.d.av ? ', avoidable' : ''}; defensive ${dw}${x.first ? `; external ${ext ? x.d.ext.map(e => e[1]).join(', ') : 'none'}` : ''}`;
+        return { level: lvl, text: `${cardDur(x.d.s)}${tags.length ? ' ' + tags.join(' · ') : ''}`, title, attrs: { 'data-death': i } };
+      })) + `</div>`;
+      html += `<details class='table-view card-deathlog'><summary>Show the ${cardPl(deaths.length, 'death')} as a table (with the last seconds)</summary>` +
+        tbl([['Boss', 'str'], ['Pull', 'num'], ['Time', 'num'], ['Tags', 'str'], ['Killed by', 'str'], ['Defensive (first death)', 'str'], ['External received', 'str'], ['Last seconds', 'none']],
+          deaths.map((x, i) => `<tr id='cdeath_${i}'><td>${escH(x.r.label)}</td><td>${x.r.p.i}</td><td data-sort='${x.d.s}'>${cardDur(x.d.s)}</td><td>${x.first ? "<span class='tag'>first</span>" : ''}${x.d.av ? " <span class='tag warn'>avoidable</span>" : ''}${x.d.os ? " <span class='tag'>one-shot</span>" : ''}</td><td>${escH(x.d.kb || '-')}</td>` +
+            `<td>${escH(defWord(x))}${x.first && x.d.def && x.d.def.length ? ': ' + escH(x.d.def.map(e => e[1]).join(', ')) : ''}</td><td>${x.first ? (x.d.ext && x.d.ext.length ? escH(x.d.ext.map(e => `${e[1]} from ${e[2]}`).join(', ')) : 'none') : "<span class='muted'>-</span>"}</td><td>${recap(x.d)}</td></tr>`),
+          'deathlog', `${cardPl(deaths.length, 'death')} in pull order`) + `</details>`;
+      html += `<p class='section-note'>Watch = avoidable (the killing blow or half the damage in the last seconds came from an avoidable ability) or a first death with no defensive and no external. Defensives are known for the first death of each pull only. Click a box for the recap.</p>`;
+    } else html += `<p class='section-note'>No deaths in ${cardPl(sel.length, 'pull')}${afterWipe ? ' (not counting deaths after the wipe started)' : ''}.</p>`;
+    if (wcAny) html += `<p class='section-note'>Deaths and hits after the wipe started are not counted (a wipe starts at the first death of a run of 3+ deaths within 10 s that runs to the end of the pull)${afterWipe ? `; ${cardPl(afterWipe, 'death')} of yours fell after that point` : ''}.</p>`;
+    // block 8: preparation
+    const cats = [], ucats = [];
+    sel.forEach(r => { r.cats.forEach(c => { if (c !== 'vantus' && !cats.includes(c)) cats.push(c); }); r.usecats.forEach(c => { if (!ucats.includes(c)) ucats.push(c); }); });
+    const consRecs = sel.filter(r => (r.p.cons || {})[name]);
+    html += `<h3>Preparation</h3>`;
+    if (consRecs.length && cats.length) {
+      html += `<ul class='prep-rows'>` + cats.map(c => {
+        const marks = consRecs.map(r => { const k = r.cats.indexOf(c); return k < 0 ? null : !!r.p.cons[name][k]; }).filter(x => x !== null);
+        const miss = marks.filter(x => !x).length;
+        const glyphs = marks.map(x => x ? "<span class='prep-ok'>&#10003;</span>" : "<span class='prep-fail'>&#10005;</span>").join('');
+        return `<li><span class='prep-name'>${escH(CARD_PREP[c] || c)}${c === 'prepot' ? " <span class='tag'>under-reported</span>" : ''}</span><span class='prep-glyphs' aria-hidden='true'>${glyphs}</span><span class='prep-count'>${miss ? `missed on ${miss} of ${cardPl(marks.length, 'pull')}` : `on all ${cardPl(marks.length, 'pull')}`}</span></li>`;
+      }).join('') + `</ul>`;
+      const uses = ucats.map(c => { let t = 0, m = 0; sel.forEach(r => { const k = r.usecats.indexOf(c), u = (r.p.use || {})[name]; if (k >= 0) { m++; if (u) t += u[k] || 0; } }); return m ? `${escH(CARD_PREP[c] || c)}: ${t} in ${cardPl(m, 'pull')}` : ''; }).filter(Boolean);
+      if (uses.length) html += `<p class='card-line'>Used during the pull: ${uses.join(' &middot; ')}.</p>`;
+      html += `<p class='section-note'>Glyphs are your pulls oldest first (&#10003; present at the pull start, &#10005; missing). Pre-pot is under-reported: WCL only sees potions pressed after the pull starts.</p>`;
+    } else html += `<p class='section-note'>No consumable data for your pulls in this selection.</p>`;
+    // block 9: gear (latest gear in the build)
+    const gear = (PL.gear || {})[name];
+    html += `<h3>Gear</h3>`;
+    if (gear) {
+      const range = cardNum(gear.ilvl_min) && cardNum(gear.ilvl_max) ? ` <span class='muted'>(raid ${gear.ilvl_min}&ndash;${gear.ilvl_max})</span>` : '';
+      html += `<p class='card-line'>Item level <strong>${gear.ilvl == null ? '-' : escH(gear.ilvl)}</strong>${range} from your latest pull in this build.</p>`;
+      html += (gear.gaps || []).length ? `<ul class='card-gear'>${gear.gaps.map(x => `<li>${statusText('note')} ${escH(x)}</li>`).join('')}</ul>`
+        : `<p class='section-note'>No gear gaps: enchants and sockets match the slots most of the raid fills.</p>`;
+    } else html += `<p class='section-note'>No gear data for ${escH(name)} in this build.</p>`;
+    return html + `</div>`;
+  }
+  // --- end card components ---
   // inline SVG progression chart (DOM): progressionChartHtml() emits the figure, drawProgression() fills it after innerHTML
   const SVGNS = 'http://www.w3.org/2000/svg';
   const svgEl = (name, attrs) => { const n = document.createElementNS(SVGNS, name); Object.entries(attrs).forEach(([k, v]) => n.setAttribute(k, v)); return n; };
@@ -455,6 +848,16 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
       }
     }));
   }
+  // Players-tab block (Contract E: cols, roster, nights, sev, gear, advice, named); its own try/catch, so a bad block
+  // empties only the player card (boss tabs, Who pulls first and All pulls keep working). data stays null when absent.
+  const PLAYERS = { data: null, error: '' };
+  {
+    const el = document.getElementById('data_tabPlayers');
+    if (el && (el.type === 'application/json' || window.DecompressionStream)) {
+      try { PLAYERS.data = await inflate(el); }
+      catch (err) { PLAYERS.error = err && err.message || String(err); dashShowError(`payload tabPlayers: ${err && (err.stack || err.message) || err}`); }
+    }
+  }
   const loadTab = tab => PD[tab] || null;
   playersDirty = true;   // the Players tab's "Who pulls first" matrix needs the inflated payloads, also without a filter
 
@@ -547,10 +950,13 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
   function recapHtml(d) {
     if (!d.recap.length && !(d.cs && d.cs.length)) return "<span class='muted'>-</span>";
     const max = Math.max(...d.recap.map(r => r[3]), 0);
-    const rows = d.recap.map(r => `<tr${r[3] === max ? " class='big'" : ''}><td>-${r[0]}s</td><td>${escH(r[1])}${r[4] ? " <span class='tag'>self</span>" : ''}</td><td>${escH(r[2])}</td><td>${fmtN(r[3])}</td></tr>`).join('');
+    // dying tank: 6th element = active mitigation up on that hit (1 / 0 / null = no aura data)
+    const am = d.recap.some(r => r.length > 5);
+    const amCell = r => !am ? '' : `<td>${r[5] === 1 ? "<span class='tag good'>AM up</span>" : r[5] === 0 ? "<span class='tag warn'>AM down</span>" : "<span class='muted'>unknown</span>"}</td>`;
+    const rows = d.recap.map(r => `<tr${r[3] === max ? " class='big'" : ''}><td>-${r[0]}s</td><td>${escH(r[1])}${r[4] ? " <span class='tag'>self</span>" : ''}</td><td>${escH(r[2])}</td><td>${fmtN(r[3])}</td>${amCell(r)}</tr>`).join('');
     const casts = d.cs && d.cs.length ? `<div class='casts'>Cast in that window: ${d.cs.map(c => `${escH(c[1])} <span class='muted'>(-${c[0]}s)</span>`).join(', ')}</div>` : (d.hc ? `<div class='casts'>No casts in that window.</div>` : '');
     const ext = d.ext && d.ext.length ? `<div class='casts'>Received: ${d.ext.map(x => `${escH(x[1])} from ${escH(x[2])} <span class='muted'>(-${x[0]}s)</span>`).join(', ')}</div>` : '';
-    return `<details><summary>${d.recap.length} hits, ${fmtN(d.w)}</summary><table class='recap'><thead><tr><th>Before</th><th>Ability</th><th>Source</th><th>Amount</th></tr></thead><tbody>${rows}</tbody></table>${casts}${ext}</details>`;
+    return `<details><summary>${d.recap.length} hits, ${fmtN(d.w)}</summary><table class='recap'><thead><tr><th>Before</th><th>Ability</th><th>Source</th><th>Amount</th>${am ? '<th>Mitigation</th>' : ''}</tr></thead><tbody>${rows}</tbody></table>${casts}${ext}</details>`;
   }
 
   // ---------------- boss tab sections ----------------
@@ -1007,6 +1413,8 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
     if (G.night && G.ntype && ((G.ntype === 'open') !== G.night.endsWith(' open'))) { gNight.value = ''; G.night = ''; }
     toolbar.classList.toggle('active', !!(G.night || G.player || G.ntype));
     updateFilterCount();
+    if (G.player) store.set('wcl_dash_player', G.player);   // remembered for "Show my card"
+    syncPlayerHash();
     bossTabs.forEach(tab => { const st = loadTab(tab); if (!st) return;
       st.sel.clear();
       if (G.night) st.data.pulls.filter(p => p.n === G.night).forEach(p => st.sel.add(p.i));
@@ -1021,6 +1429,40 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
     }
     renderIfDirty(cur);
   }
+  // the hash follows the Players filter only while the Players tab is open (#tabPlayers?player=X); elsewhere it keeps
+  // the #tabN form the tab buttons write. strip = true (clearAll) also drops a ?player= left on any other tab.
+  function syncPlayerHash(strip) {
+    try {
+      const h = location.hash || '', q = h.indexOf('?');
+      if (activeTab() === 'tabPlayers') { const want = playerHash(G.player); if (h !== want) history.replaceState(null, '', want); }
+      else if (strip && q >= 0) history.replaceState(null, '', h.slice(0, q) || location.pathname + location.search);
+    } catch (_) { /* file:// or sandboxed frame without history */ }
+  }
+  const hasPlayerOption = name => !!name && [...gPlayer.options].some(o => o.value && o.value === name);
+  const pickPlayer = name => { if (!hasPlayerOption(name) || G.player === name) return false; gPlayer.value = name; applyGlobal(); return true; };
+  // click-your-name: a name in any player row (tr[data-player] .player) or any [data-player-pick] control (#showMyCard,
+  // T6's card) sets the toolbar Player filter
+  document.addEventListener('click', e => {
+    const el = e.target.closest && e.target.closest("tr[data-player] .player, [data-player-pick]"); if (!el) return;
+    const name = el.hasAttribute('data-player-pick') ? el.getAttribute('data-player-pick') : el.closest('tr[data-player]').dataset.player;
+    if (hasPlayerOption(name)) { e.preventDefault(); pickPlayer(name); }
+  });
+  // .copy-link (data-player = label, else the current filter): copies page URL + playerHash(name); when the clipboard
+  // is unavailable (file://, old browser, denied) the link is shown as selectable text next to the button
+  document.addEventListener('click', e => {
+    const btn = e.target.closest && e.target.closest('.copy-link'); if (!btn) return;
+    e.preventDefault();
+    const name = btn.dataset.player || G.player; if (!name) return;
+    const url = location.href.split('#')[0] + playerHash(name);
+    const fallback = () => {
+      let out = btn.nextElementSibling;
+      if (!out || !out.classList.contains('copy-url')) { out = document.createElement('code'); out.className = 'copy-url'; btn.after(out); }
+      out.textContent = url;
+      try { const r = document.createRange(); r.selectNodeContents(out); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); } catch (_) { /* selection is a convenience */ }
+    };
+    const done = () => { btn.textContent = 'Link copied'; setTimeout(() => { btn.textContent = 'Copy link'; }, 2000); };
+    try { if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(done, fallback); else fallback(); } catch (_) { fallback(); }
+  });
   function renderIfDirty(tab) {
     if (!tab) return;
     if (tab === 'tabPlayers') { if (playersDirty) renderPlayersTab(); return; }
@@ -1032,6 +1474,7 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
     [...gNight.options].forEach(o => o.hidden = false);
     toolbar.classList.remove('active');
     updateFilterCount();
+    syncPlayerHash(true);
     bossTabs.forEach(tab => { const st = PD[tab]; if (!st) return; st.sel.clear(); st.player = ''; st.dirty = true; updateBadge(tab); });
     playersDirty = true;
     renderIfDirty(activeTab());
@@ -1075,30 +1518,41 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && (G.night || G.player || G.ntype || bossTabs.some(t => PD[t] && PD[t].sel.size))) clearAll(); });
 
   // ---------------- Players tab under a global filter ----------------
+  // the player card (filtered Players tab): every pull of every boss tab goes in, playerCardHtml applies the toolbar's
+  // night / nights-type filter itself (earlier nights feed the deltas); copy = the header's copy-link button
+  function renderPlayerCard(name, copy) {
+    if (PLAYERS.error) return `<div class='card player-card'><h2 class='panel-title'>${escH(name)}</h2><p class='card-counts'>${copy || ''}</p>${emptyHtml('player card', `the Players data could not be decoded: ${PLAYERS.error}`, 'the tables below still work')}</div>`;
+    const lists = bossTabs.map(tab => { const st = loadTab(tab); return st ? { key: tab, label: TAB_NAMES[tab], pulls: st.data.pulls, cols: st.data.pmcols, avoid: st.data.avoidSet.size > 0, cats: st.data.cats, usecats: st.data.usecats } : null; }).filter(Boolean);
+    try {
+      return playerCardHtml(name, lists, PLAYERS.data, G, { named: !!CFG.named, recap: recapHtml, roleOf, support: sp => SUPPORT.has(sp), copy,
+        empty: emptyHtml('pulls', `${name} has no pulls in this selection`, 'Esc clears the filters') });
+    } catch (err) {
+      dashShowError(`player card ${name}: ${err && (err.stack || err.message) || err}`);
+      return `<div class='card player-card'><h2 class='panel-title'>${escH(name)}</h2><p class='card-counts'>${copy || ''}</p>${emptyHtml('player card', `it could not be built: ${err && err.message || err}`, '')}</div>`;
+    }
+  }
+  // a box in the card's deaths row opens the death table and that death's recap
+  document.addEventListener('click', e => {
+    const box = e.target.closest && e.target.closest('.card-deaths .box[data-death]'); if (!box) return;
+    const row = document.getElementById('cdeath_' + box.dataset.death); if (!row) return;
+    const log = row.closest('details.card-deathlog'); if (log) log.open = true;
+    const rd = row.querySelector('details'); if (rd) rd.open = true;
+    row.scrollIntoView({ block: 'nearest', behavior: SCROLL });
+    const sum = rd && rd.querySelector('summary'); if (sum) sum.focus();
+  });
   function renderPlayersTab() {
     const stat = document.getElementById('static_tabPlayers'), panel = document.getElementById('detail_tabPlayers');
     playersDirty = false;
     // unfiltered: the static (Python) view stays and the panel carries only the "Who pulls first" matrix over every pull
     if (!G.night && !G.player && !G.ntype) { stat.classList.remove('hidden'); panel.classList.remove('filtered'); panel.classList.add('open');
-      panel.innerHTML = whoPullsFirstHtml(() => true) + allPullsHtml(() => true); wireSort(panel); wireToggles(panel); return; }
+      const mine = store.get('wcl_dash_player');
+      const myCard = hasPlayerOption(mine) ? `<p class='my-card'><button type='button' id='showMyCard' data-player-pick='${escH(mine)}'>Show my card (${escH(mine)})</button></p>` : '';
+      panel.innerHTML = myCard + whoPullsFirstHtml(() => true) + allPullsHtml(() => true); wireSort(panel); wireToggles(panel); return; }
     stat.classList.add('hidden');
     const nightOk = p => G.night ? p.n === G.night : typeOk(p);
     let html = `<button type='button' class='close'>&#10005; show everything</button>`;
     if (G.player) {
-      html += `<h2 class='panel-title'>${escH(G.player)} <span class='sub'>${G.night ? escH(G.night) + ' &middot; ' : ''}per boss</span></h2>`;
-      const rows = [];
-      bossTabs.forEach(tab => { const st = loadTab(tab); if (!st) return; const D = st.data, A = D.avoidSet, IG = D.ignoreSet;
-        let S = D.pulls.filter(nightOk); S = S.filter(p => G.player in p.parts); if (!S.length) return;
-        let fd = 0, deaths = 0, av = 0, dmg = 0, total = 0, heal = 0, secs = 0;
-        S.forEach(p => { secs += p.d; p.deaths.forEach((d, i) => { if (d.pl === G.player) { deaths++; if (i === 0) fd++; } });
-          p.dt.forEach(([name, a, h, amt]) => { if (name !== G.player || IG.has(norm(a))) return; dmg += amt; if (A.has(norm(a))) av += h; });
-          (p.dd || []).forEach(([name, , , t]) => { if (name === G.player) total += t; }); (p.hd || []).forEach(([name, , , t]) => { if (name === G.player) heal += t; }); });
-        const n = S.length;
-        rows.push(`<tr><td><button type='button' class='gotab linklike' data-tab='${tab}'>${escH(TAB_NAMES[tab])}</button></td><td>${n}</td><td>${fd}</td><td data-sort='${fd / n}'>${pct(fd, n)}%</td><td>${deaths}</td>${A.size ? `<td data-sort='${av / n}'>${(av / n).toFixed(1)}</td>` : `<td class='muted'>-</td>`}<td data-sort='${dmg / n}'>${fmtN(dmg / n)}</td><td data-sort='${total / (secs || 1)}'>${fmtN(total / (secs || 1))}</td><td data-sort='${heal / (secs || 1)}'>${fmtN(heal / (secs || 1))}</td></tr>`);
-      });
-      html += rows.length ? tbl([['Boss', 'str'], ['Pulls', 'num'], ['First death', 'num'], ['Started the wipe', 'num'], ['Deaths', 'num'], ['Avoidable hits / pull', 'num'], ['Dmg taken / pull', 'num'], ['DPS', 'num'], ['HPS', 'num']], rows, '', `${rows.length} boss${rows.length === 1 ? '' : 'es'} with pulls in this selection`)
-                          : emptyHtml('pulls', `${G.player} has no pulls in this selection`, 'Esc clears the filters');
-      html += `<p class='section-note'>Click a boss name to open that tab with the same filters.</p>`;
+      html += renderPlayerCard(G.player, `<button type='button' class='copy-link linklike' data-player='${escH(G.player)}'>Copy link</button>`);
       html += whoPullsFirstHtml(p => nightOk(p) && G.player in p.parts);
       html += allPullsHtml(p => nightOk(p) && G.player in p.parts);
     } else {
@@ -1121,8 +1575,12 @@ window.addEventListener('unhandledrejection', e => dashShowError(e.reason));
   }
 
   // deep links: dashboard.html#tab3 opens that tab, #tab3:deaths also scrolls to a section; the hash follows the active tab
-  tabButtons.forEach(btn => btn.addEventListener('click', () => { try { history.replaceState(null, '', '#' + btn.dataset.tab); } catch (_) { /* ignore */ } }));
-  const [wanted, wantedSec] = (location.hash || '').slice(1).split(':');
+  // #tabPlayers?player=X (playerHash) pre-selects that player; the query is split off before the ':' section split
+  tabButtons.forEach(btn => btn.addEventListener('click', () => { try { history.replaceState(null, '', btn.dataset.tab === 'tabPlayers' && G.player ? playerHash(G.player) : '#' + btn.dataset.tab); } catch (_) { /* ignore */ } }));
+  const rawHash = (location.hash || '').slice(1), qAt = rawHash.indexOf('?');
+  const [wanted, wantedSec] = (qAt < 0 ? rawHash : rawHash.slice(0, qAt)).split(':');
+  const wantedPlayer = parsePlayerHash(rawHash);
+  if (hasPlayerOption(wantedPlayer)) { gPlayer.value = wantedPlayer; applyGlobal(); }   // before the tab opens: one render
   if (wanted && document.getElementById(wanted) && $(`.tab-btn[data-tab='${wanted}']`)) {
     const btn = $(`.tab-btn[data-tab='${wanted}']`);
     if (btn.dataset.diff && btn.classList.contains('diff-hidden')) setDiff('all', false);   // show the tab; never persist a deep link
